@@ -15,7 +15,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowThreadProcessId,
+    GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
 };
 
 /// Tracks client cursor + previous key snapshot for deltas.
