@@ -146,15 +146,17 @@ impl SessionManager {
         let join_handle = run_host_join_listener(control).map_err(|e| e.to_string())?;
         let allowed_peer = join_handle.allowed_peer();
 
-        let input_handle = run_host_input_loop(HostInputConfig {
+        let input_handle = match run_host_input_loop(HostInputConfig {
             media_port: media,
             allow_remote_input: allow,
             allowed_peer,
-        })
-        .map_err(|e| {
-            join_handle.stop();
-            e.to_string()
-        })?;
+        }) {
+            Ok(h) => h,
+            Err(e) => {
+                join_handle.stop();
+                return Err(e.to_string());
+            }
+        };
 
         let vigem_ok = input_handle.vigem_ok();
         let vigem_detail = input_handle.vigem_detail().to_string();
