@@ -25,6 +25,8 @@ jobs:
   desktop-windows:
     name: Build Windows .exe
     runs-on: windows-latest
+    permissions:
+      contents: write  # publish rolling nightly release for in-app updater
 
     steps:
       - uses: actions/checkout@v5
@@ -153,3 +155,47 @@ jobs:
           path: dist/lanplay-portable/**
           if-no-files-found: error
           retention-days: 14
+
+      # Rolling release for in-app Update button (public download, no Actions login).
+      - name: Write build-info + zip portable
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $out = "dist\lanplay-portable"
+          $sha = $env:GITHUB_SHA
+          $short = $sha.Substring(0, [Math]::Min(12, $sha.Length))
+          @"
+          {
+            "sha": "$sha",
+            "shortSha": "$short",
+            "builtAt": "$(Get-Date -Format o)",
+            "runId": "${{ github.run_id }}"
+          }
+          "@ | Set-Content -Path "$out\build-info.json" -Encoding UTF8
+          "Commit: $sha" | Set-Content -Path "$out\BUILD_INFO.txt" -Encoding UTF8
+          $zip = "dist\lanplay-windows-nightly.zip"
+          if (Test-Path $zip) { Remove-Item -Force $zip }
+          Compress-Archive -Path "$out\*" -DestinationPath $zip -Force
+          # Also name with sha for clarity in release assets list
+          Copy-Item -Force $zip "dist\lanplay-windows-$short.zip"
+          Get-Item dist\lanplay-windows-*.zip | Format-Table Name, Length
+
+      - name: Publish nightly release (in-app updater)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: LANPlay Nightly
+          prerelease: true
+          generate_release_notes: false
+          body: |
+            Rolling build for the in-app **Update** button.
+
+            Commit: ${{ github.sha }}
+            Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Download `lanplay-windows-nightly.zip`, unzip, run `lanplay.exe`.
+            Or open LANPlay → **Update** to install automatically.
+          files: dist/lanplay-windows-nightly.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

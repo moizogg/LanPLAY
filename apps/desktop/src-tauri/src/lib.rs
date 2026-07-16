@@ -2,6 +2,7 @@ mod firewall;
 mod session;
 mod settings_store;
 mod tailscale;
+mod updater;
 mod vigem_setup;
 
 use lanplay_controllers::{CaptureStatus, VigemBundleStatus};
@@ -22,7 +23,18 @@ fn get_app_info() -> serde_json::Value {
         "version": env!("CARGO_PKG_VERSION"),
         "protocolVersion": PROTOCOL_VERSION,
         "phase": 6,
+        "gitSha": updater::current_git_sha(),
     })
+}
+
+#[tauri::command]
+fn check_for_update() -> updater::UpdateStatus {
+    updater::check_for_update()
+}
+
+#[tauri::command]
+fn apply_update() -> Result<String, String> {
+    updater::apply_update()
 }
 
 #[tauri::command]
@@ -184,6 +196,8 @@ pub fn run() {
             set_video_settings,
             get_encoder_options,
             get_resolution_presets,
+            check_for_update,
+            apply_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LANPlay");

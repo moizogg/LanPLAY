@@ -13,6 +13,17 @@ export interface AppInfo {
   version: string;
   protocolVersion: number;
   phase: number;
+  gitSha?: string;
+}
+
+export interface UpdateStatus {
+  currentSha: string;
+  currentVersion: string;
+  latestSha: string | null;
+  latestName: string | null;
+  downloadUrl: string | null;
+  updateAvailable: boolean;
+  detail: string;
 }
 
 export interface TailscaleInfo {

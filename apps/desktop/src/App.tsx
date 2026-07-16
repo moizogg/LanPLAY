@@ -12,6 +12,7 @@ import type {
   HostStatus,
   ResolutionPreset,
   TailscaleInfo,
+  UpdateStatus,
   VideoSettings,
   VigemBundleStatus,
 } from "./types";
@@ -92,6 +93,8 @@ export default function App() {
   const [resPresets, setResPresets] = useState<ResolutionPreset[]>([]);
   const [settingsSaved, setSettingsSaved] = useState<string | null>(null);
   const [settingsDirty, setSettingsDirty] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<UpdateStatus | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
 
   /** Session/controller metrics only — safe to poll often (no external CLI). */
   const refreshLive = useCallback(async () => {
@@ -194,6 +197,44 @@ export default function App() {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onCheckUpdate() {
+    setUpdateBusy(true);
+    setError(null);
+    try {
+      const st = await invoke<UpdateStatus>("check_for_update");
+      setUpdateInfo(st);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  async function onApplyUpdate() {
+    setUpdateBusy(true);
+    setError(null);
+    try {
+      const msg = await invoke<string>("apply_update");
+      setUpdateInfo((prev) =>
+        prev
+          ? { ...prev, detail: msg, updateAvailable: false }
+          : {
+              currentSha: appInfo?.gitSha ?? "?",
+              currentVersion: appInfo?.version ?? "?",
+              latestSha: null,
+              latestName: null,
+              downloadUrl: null,
+              updateAvailable: false,
+              detail: msg,
+            },
+      );
+      // App will be restarted by the updater script.
+    } catch (e) {
+      setError(String(e));
+      setUpdateBusy(false);
     }
   }
 
@@ -382,9 +423,45 @@ export default function App() {
               best-effort).
             </p>
           </div>
-          <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-right text-xs text-slate-400">
-            <div>v{appInfo?.version ?? "…"}</div>
-            <div>protocol {appInfo?.protocolVersion ?? "…"}</div>
+          <div className="flex flex-col items-end gap-2">
+            <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-right text-xs text-slate-400">
+              <div>v{appInfo?.version ?? "…"}</div>
+              <div className="font-mono text-[10px] text-slate-500">
+                {appInfo?.gitSha ?? "dev"}
+              </div>
+              <div>protocol {appInfo?.protocolVersion ?? "…"}</div>
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                disabled={updateBusy}
+                onClick={() => void onCheckUpdate()}
+                className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-white/10 disabled:opacity-50"
+              >
+                {updateBusy ? "…" : "Check update"}
+              </button>
+              {updateInfo?.updateAvailable && (
+                <button
+                  type="button"
+                  disabled={updateBusy}
+                  onClick={() => void onApplyUpdate()}
+                  className="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950 transition hover:bg-emerald-400 disabled:opacity-50"
+                >
+                  Update now
+                </button>
+              )}
+            </div>
+            {updateInfo && (
+              <p
+                className={`max-w-[16rem] text-right text-[11px] ${
+                  updateInfo.updateAvailable
+                    ? "text-emerald-300"
+                    : "text-slate-500"
+                }`}
+              >
+                {updateInfo.detail}
+              </p>
+            )}
           </div>
         </header>
 
@@ -1162,8 +1239,12 @@ export default function App() {
 
         <footer className="mt-auto space-y-1 text-xs text-slate-600">
           <p>
-            Phase 6: video via HELLO punch. Start Host may ask once for
-            Firewall / UAC — allow LANPlay so clients can reach you.
+            <strong className="text-slate-500">Update:</strong> Check update →
+            Update now installs the latest nightly and restarts. No more
+            manual GitHub artifact downloads.
+          </p>
+          <p>
+            Phase 6 stream + firewall. Host may ask once for UAC/Firewall.
           </p>
           <p>
             Encode plan:{" "}
