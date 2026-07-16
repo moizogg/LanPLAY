@@ -1,27 +1,25 @@
 //! Best-effort exclusive open of gamepad HID devices on the **client**.
 //!
-//! Goal: while LANPlay is streaming, the physical pad is "held" so local games
-//! on the client are less likely to use it. Xbox XInput pads may still appear
-//! to XInput (Windows limitation without HidHide); HID-class pads often block.
+//! While the session is active we try to open matching HID paths with exclusive
+//! share mode so local apps are less likely to use the pad.
+//! Note: pure XInput Xbox pads may still show in XInput without HidHide.
 
 #![cfg(windows)]
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::ptr;
-use windows::core::{GUID, PCWSTR, PWSTR};
+use windows::core::{GUID, PCWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
-    SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO,
+    SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
     SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
 };
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, HWND};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_NONE, OPEN_EXISTING,
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_MODE, OPEN_EXISTING,
 };
-use windows::Win32::UI::WindowsAndMessaging::HWND_MESSAGE;
 
-// GUID_DEVINTERFACE_HID
+/// GUID_DEVINTERFACE_HID {4D1E55B2-F16F-11CF-88CB-001111000030}
 const GUID_DEVINTERFACE_HID: GUID = GUID {
     data1: 0x4D1E55B2,
     data2: 0xF16F,
@@ -35,11 +33,9 @@ pub struct ExclusivePadGuard {
 }
 
 impl ExclusivePadGuard {
-    /// Try to exclusively open HID interfaces that look like game controllers.
     pub fn acquire() -> Self {
         let mut handles = Vec::new();
-        let paths = enumerate_hid_paths();
-        for path in paths {
+        for path in enumerate_hid_paths() {
             if !looks_like_gamepad(&path) {
                 continue;
             }
@@ -67,15 +63,14 @@ impl Drop for ExclusivePadGuard {
 
 fn looks_like_gamepad(path: &str) -> bool {
     let u = path.to_ascii_uppercase();
-    // Common Xbox / generic gamepad path markers
     u.contains("IG_")
         || u.contains("XUSB")
         || u.contains("XINPUT")
         || u.contains("GAMEPAD")
         || u.contains("JOYSTICK")
-        || u.contains("VID_045E") // Microsoft
-        || u.contains("VID_054C") // Sony
-        || u.contains("VID_057E") // Nintendo
+        || u.contains("VID_045E")
+        || u.contains("VID_054C")
+        || u.contains("VID_057E")
 }
 
 fn open_exclusive(path: &str) -> Option<HANDLE> {
@@ -84,11 +79,11 @@ fn open_exclusive(path: &str) -> Option<HANDLE> {
         .chain(std::iter::once(0))
         .collect();
     unsafe {
-        // Share mode 0 = exclusive; fails if another app has the device open.
+        // FILE_SHARE_MODE(0) = exclusive
         let h = CreateFileW(
             PCWSTR(wide.as_ptr()),
-            (GENERIC_READ.0 | GENERIC_WRITE.0) as u32,
-            FILE_SHARE_NONE,
+            GENERIC_READ.0 | GENERIC_WRITE.0,
+            FILE_SHARE_MODE(0),
             None,
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
@@ -106,21 +101,20 @@ fn open_exclusive(path: &str) -> Option<HANDLE> {
 fn enumerate_hid_paths() -> Vec<String> {
     let mut out = Vec::new();
     unsafe {
-        let hdev: HDEVINFO = match SetupDiGetClassDevsW(
+        let Ok(hdev) = SetupDiGetClassDevsW(
             Some(&GUID_DEVINTERFACE_HID),
             PCWSTR::null(),
-            HWND(ptr::null_mut()),
+            HWND::default(),
             DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
-        ) {
-            Ok(h) => h,
-            Err(_) => return out,
+        ) else {
+            return out;
         };
 
         let mut index = 0u32;
         loop {
             let mut ifdata = SP_DEVICE_INTERFACE_DATA {
                 cbSize: std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
-                InterfaceClassGuid: GUID::default(),
+                InterfaceClassGuid: GUID::zeroed(),
                 Flags: 0,
                 Reserved: 0,
             };
@@ -145,17 +139,18 @@ fn enumerate_hid_paths() -> Vec<String> {
                 Some(&mut required),
                 None,
             );
-            if required == 0 {
+            if required < 8 {
                 index += 1;
                 continue;
             }
 
             let mut buf = vec![0u8; required as usize];
+            // SAFETY: buffer is large enough for SP_DEVICE_INTERFACE_DETAIL_DATA_W + path
             let detail = buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
             (*detail).cbSize = if cfg!(target_pointer_width = "64") {
                 8
             } else {
-                6
+                std::mem::size_of::<u32>() as u32 + 2
             };
 
             if SetupDiGetDeviceInterfaceDetailW(
@@ -168,8 +163,7 @@ fn enumerate_hid_paths() -> Vec<String> {
             )
             .is_ok()
             {
-                // DevicePath is a flexible array at the end of the struct
-                let path_ptr = std::ptr::addr_of!((*detail).DevicePath) as *const u16;
+                let path_ptr = (*detail).DevicePath.as_ptr();
                 let path = wide_cstr(path_ptr);
                 if !path.is_empty() {
                     out.push(path);
