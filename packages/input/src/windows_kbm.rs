@@ -5,6 +5,7 @@
 //! - Capture ON but unfocused → empty (safety)
 
 use crate::capture::{self, relative_mouse};
+use crate::wheel_hook;
 use lanplay_protocol::{
     KbmPacket, KBM_FLAG_LBUTTON, KBM_FLAG_MBUTTON, KBM_FLAG_RBUTTON,
 };
@@ -74,11 +75,13 @@ pub fn sample_kbm_on_client(
     // Not capturing or not focused → empty packet (raises keys on host)
     if !capture_active || !is_lanplay_focused() {
         state.has_pos = false;
+        let _ = wheel_hook::take_wheel_notches(); // don't bank scroll while uncaptured
         return empty_packet(seq);
     }
 
     // Do not forward the ungrab combo itself (Ctrl+Shift+Alt+Z)
     if capture::ungrab_hotkey_pressed() {
+        let _ = wheel_hook::take_wheel_notches();
         return empty_packet(seq);
     }
 
@@ -98,6 +101,9 @@ pub fn sample_kbm_on_client(
     } else {
         mouse_delta_absolute(state)
     };
+
+    // Wheel notches accumulated by low-level mouse hook (poll APIs can't see scroll)
+    let wheel = wheel_hook::take_wheel_notches();
 
     let mut keys = [0u8; 8];
     let mut key_count = 0u8;
@@ -120,7 +126,7 @@ pub fn sample_kbm_on_client(
         client_ts_us: 0,
         mouse_dx: dx,
         mouse_dy: dy,
-        wheel: 0,
+        wheel,
         keys,
         key_count,
     };

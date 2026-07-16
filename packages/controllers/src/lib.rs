@@ -19,7 +19,8 @@ pub use virtual_pad::{
 
 pub use lanplay_input::{CaptureState, CaptureStatus};
 use lanplay_input::{
-    sample_kbm_on_client, ungrab_hotkey_pressed, ClientKbmState, ExclusivePadGuard,
+    ensure_wheel_hook, sample_kbm_on_client, stop_wheel_hook, ungrab_hotkey_pressed, ClientKbmState,
+    ExclusivePadGuard,
 };
 use lanplay_protocol::{InputPacket, FLAG_CONNECTED};
 use std::net::SocketAddr;
@@ -138,6 +139,8 @@ fn client_loop(
 
     let exclusive = ExclusivePadGuard::acquire();
     let exclusive_n = exclusive.count();
+    // Mouse wheel needs a low-level hook (can't poll scroll with GetAsyncKeyState)
+    ensure_wheel_hook();
 
     let period = Duration::from_micros((1_000_000u64 / poll_hz.max(30) as u64).max(1));
     let mut seq: u32 = 0;
@@ -229,6 +232,7 @@ fn client_loop(
     }
 
     capture.set_active(false);
+    stop_wheel_hook();
     drop(exclusive);
     stats.set_detail("Client input stopped. Capture released.");
     session_alive.store(false, Ordering::SeqCst);

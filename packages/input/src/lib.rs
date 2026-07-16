@@ -10,7 +10,12 @@ mod capture;
 #[cfg(windows)]
 mod exclusive_pad;
 #[cfg(windows)]
+mod wheel_hook;
+#[cfg(windows)]
 mod windows_kbm;
+
+#[cfg(windows)]
+pub use wheel_hook::{ensure_wheel_hook, stop_wheel_hook, take_wheel_notches};
 
 pub use capture::{ungrab_hotkey_pressed, CaptureState, CaptureStatus};
 
@@ -62,6 +67,12 @@ pub mod stub {
     }
 
     pub fn apply_kbm_on_host(_state: &mut HostKbmState, _packet: &KbmPacket) {}
+
+    pub fn ensure_wheel_hook() {}
+    pub fn stop_wheel_hook() {}
+    pub fn take_wheel_notches() -> i16 {
+        0
+    }
 }
 
 #[cfg(not(windows))]
