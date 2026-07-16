@@ -103,3 +103,27 @@ So: **weak CPU makes our current design much worse**, but **even a strong PC wil
 5. Only then more UI polish  
 
 Until (1)+(2), Settings knobs only **trade** sharpness vs lag (lower res/FPS = less mush, not Sunshine-smooth).
+
+## Critical detail for Intel HD 4000
+
+Sunshine does **not** use Windows Media Foundation hardware MFTs for QSV.
+It uses **FFmpeg `h264_qsv` / Media SDK** with **D3D11 zero-copy** textures
+(`display_vram.cpp` → GPU NV12 convert → QSV).
+
+LANPlay’s “hardware” path is **Media Foundation H.264 MFT**. On many HD 4000
+driver installs that MFT is **missing**, even though Sunshine QSV works.
+Result: LANPlay falls back to **OpenH264 CPU** → mush; Sunshine stays smooth.
+
+### What we improved without full GPU zero-copy
+
+- Map GPU→CPU **only on encode ticks** (not every DXGI frame)
+- Soft software profile ~**960p30** when HW MFT unavailable
+- Fast nearest scale + frame skip under load
+- Re-encode last desktop + fresh cursor when DXGI is idle (mouse stays live)
+- Probe UI explains MF vs Sunshine/QSV
+
+### Still required for real Sunshine parity
+
+- **FFmpeg/libavcodec `h264_qsv`** (or NVENC/AMF SDK) with D3D11 frames
+- GPU scale/color convert (no full-frame Map)
+- Client DXVA/D3D11 decode

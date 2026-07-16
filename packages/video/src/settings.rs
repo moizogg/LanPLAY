@@ -38,13 +38,14 @@ impl Default for VideoSettings {
     fn default() -> Self {
         Self {
             output_index: 0,
-            // Prefer 1080p60 @ 25 Mbps; HW MF/NVENC when available via `auto`.
-            fps: 60,
-            bitrate_kbps: 25_000,
+            // Prefer smooth over sharp until GPU zero-copy encode lands.
+            // `auto` uses HW MF when present; software path clamps further (~960p30).
+            fps: 30,
+            bitrate_kbps: 8_000,
             resolution_mode: ResolutionMode::Auto,
-            max_edge: 1920,
-            width: 1920,
-            height: 1080,
+            max_edge: 1280,
+            width: 1280,
+            height: 720,
             encoder: "auto".into(),
         }
     }
@@ -113,10 +114,11 @@ pub fn list_encoder_options() -> Vec<EncoderOption> {
             available: true,
             hardware: hw,
             detail: if hw {
-                "Uses Media Foundation HW H.264 (NVENC/AMF/QSV when present), else OpenH264."
+                "Uses Media Foundation HW H.264 (NVENC/AMF/QSV when present), else OpenH264 soft profile."
                     .into()
             } else {
-                "No HW H.264 MFT found — will use OpenH264 software.".into()
+                "No MF hardware H.264 MFT — OpenH264 soft profile (~960p30). Note: Sunshine uses FFmpeg QSV (not MF); HD 4000 can still stream well in Sunshine while MF is empty."
+                    .into()
             },
         },
         EncoderOption {

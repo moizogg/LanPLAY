@@ -35,7 +35,7 @@ impl Default for CaptureConfig {
             fixed_width: None,
             fixed_height: None,
             bitrate_bps: 8_000_000,
-            encoder_id: "openh264".into(),
+            encoder_id: "auto".into(),
         }
     }
 }
@@ -252,15 +252,18 @@ mod windows_dxgi {
             Ok(())
         }
 
-        /// Capture one frame into `self.bgra` (BGRA8 tightly packed).
-        fn capture_bgra(&mut self) -> Result<Option<(u32, u32)>, String> {
+        /// Acquire a desktop frame. When `map_cpu` is false, drop the GPU frame without
+        /// staging Map (Sunshine never Maps full frames every tick — Map is our biggest tax).
+        fn capture_bgra(&mut self, map_cpu: bool) -> Result<Option<(u32, u32)>, String> {
             unsafe {
                 let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
                 let mut resource: Option<IDXGIResource> = None;
 
+                // Short wait when not mapping (pace on encode interval); a bit longer when encoding.
+                let wait_ms = if map_cpu { 8u32 } else { 4u32 };
                 let hr = self
                     .duplication
-                    .AcquireNextFrame(16, &mut frame_info, &mut resource);
+                    .AcquireNextFrame(wait_ms, &mut frame_info, &mut resource);
 
                 if let Err(e) = hr {
                     let code = e.code();
@@ -277,6 +280,12 @@ mod windows_dxgi {
                 let src_tex: ID3D11Texture2D = resource
                     .cast()
                     .map_err(|e| format!("texture cast: {e}"))?;
+
+                if !map_cpu {
+                    // Drain DXGI queue without the expensive GPU→CPU readback.
+                    let _ = self.duplication.ReleaseFrame();
+                    return Ok(None);
+                }
 
                 // Read texture desc for format
                 let mut src_desc = D3D11_TEXTURE2D_DESC::default();
@@ -310,16 +319,84 @@ mod windows_dxgi {
                 self.context.Unmap(staging, 0);
                 let _ = self.duplication.ReleaseFrame();
 
-                // DXGI desktop image has no cursor — composite OS cursor (Moonlight/Sunshine-style).
-                draw_cursor_bgra(&mut self.bgra, self.width, self.height);
-
+                // Cursor is composited later per encode (so idle DXGI + moving mouse still updates).
                 Ok(Some((self.width, self.height)))
             }
         }
     }
 
-    /// Draw the system cursor into a tight BGRA buffer (primary display / output 0).
+    /// Encode one BGRA frame (scale + H.264 + publish). Shared by fresh capture and cursor-only refresh.
+    fn encode_one_frame(
+        enc: &mut Box<dyn VideoEncoder>,
+        video_sink: &Option<VideoStreamSink>,
+        bgra: &[u8],
+        w: u32,
+        h: u32,
+        stats: &AtomicCaptureStats,
+        last_encode: &mut Instant,
+        next_encode_deadline: &mut Instant,
+        encode_interval: Duration,
+        last_idr: &mut Instant,
+        encode_window: &mut u32,
+        bytes_window: &mut u64,
+        t0: Instant,
+    ) {
+        if let Some(ref sink) = video_sink {
+            let need_idr = sink.take_force_keyframe()
+                || (sink.has_peer() && last_idr.elapsed() >= Duration::from_secs(2));
+            if need_idr {
+                enc.force_keyframe();
+                *last_idr = Instant::now();
+            }
+        }
+
+        let t1 = Instant::now();
+        // Scale first (small buffer), then stamp cursor in encode space — avoids 8MB clone.
+        let mut work = if w == enc.width() && h == enc.height() {
+            bgra.to_vec()
+        } else {
+            scale_bgra_nn(bgra, w, h, enc.width(), enc.height())
+        };
+        draw_cursor_bgra_scaled(&mut work, enc.width(), enc.height(), w, h);
+
+        match enc.encode_bgra(&work, t0.elapsed().as_micros() as u64) {
+            Ok(Some(frame)) => {
+                let encode_us = t1.elapsed().as_micros() as u64;
+                stats.record_encode(enc.width(), enc.height(), encode_us, frame.data.len());
+                *encode_window += 1;
+                *bytes_window += frame.data.len() as u64;
+                *last_encode = Instant::now();
+                *next_encode_deadline = *last_encode + encode_interval;
+                if let Some(ref sink) = video_sink {
+                    sink.publish(enc.width(), enc.height(), frame);
+                }
+            }
+            Ok(None) => {
+                *last_encode = Instant::now();
+                *next_encode_deadline = *last_encode + encode_interval;
+            }
+            Err(e) => {
+                stats.set_detail(format!("Encode error: {e}"));
+                *last_encode = Instant::now();
+                *next_encode_deadline = *last_encode + encode_interval;
+            }
+        }
+    }
+
+    /// Draw system cursor into BGRA at capture coords (no scale).
+    #[allow(dead_code)]
     fn draw_cursor_bgra(bgra: &mut [u8], width: u32, height: u32) {
+        draw_cursor_bgra_scaled(bgra, width, height, width, height);
+    }
+
+    /// Draw system cursor into encode-sized BGRA, mapping from capture space → encode space.
+    fn draw_cursor_bgra_scaled(
+        bgra: &mut [u8],
+        dst_w: u32,
+        dst_h: u32,
+        src_w: u32,
+        src_h: u32,
+    ) {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::Graphics::Gdi::{
             CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
@@ -329,6 +406,10 @@ mod windows_dxgi {
         use windows::Win32::UI::WindowsAndMessaging::{
             DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, ICONINFO,
         };
+
+        if dst_w == 0 || dst_h == 0 || src_w == 0 || src_h == 0 {
+            return;
+        }
 
         unsafe {
             let mut ci = CURSORINFO {
@@ -357,9 +438,11 @@ mod windows_dxgi {
 
             let x = ci.ptScreenPos.x - hot_x;
             let y = ci.ptScreenPos.y - hot_y;
-            let cw = 32i32;
-            let ch = 32i32;
-            if x + cw < 0 || y + ch < 0 || x >= width as i32 || y >= height as i32 {
+            let sx = (x as f32 * dst_w as f32 / src_w as f32).round() as i32;
+            let sy = (y as f32 * dst_h as f32 / src_h as f32).round() as i32;
+            let cw = ((32.0f32 * dst_w as f32 / src_w as f32).round() as i32).max(8);
+            let ch = ((32.0f32 * dst_h as f32 / src_h as f32).round() as i32).max(8);
+            if sx + cw < 0 || sy + ch < 0 || sx >= dst_w as i32 || sy >= dst_h as i32 {
                 return;
             }
 
@@ -407,13 +490,13 @@ mod windows_dxgi {
             }
 
             for row in 0..ch {
-                let dy = y + row;
-                if dy < 0 || dy >= height as i32 {
+                let dy = sy + row;
+                if dy < 0 || dy >= dst_h as i32 {
                     continue;
                 }
                 for col in 0..cw {
-                    let dx = x + col;
-                    if dx < 0 || dx >= width as i32 {
+                    let dx = sx + col;
+                    if dx < 0 || dx >= dst_w as i32 {
                         continue;
                     }
                     let si = ((row * cw + col) * 4) as usize;
@@ -424,7 +507,7 @@ mod windows_dxgi {
                     if r == 0 && g == 0 && b == 0 && a == 0 {
                         continue;
                     }
-                    let di = ((dy as u32 * width + dx as u32) * 4) as usize;
+                    let di = ((dy as u32 * dst_w + dx as u32) * 4) as usize;
                     if di + 3 >= bgra.len() {
                         continue;
                     }
@@ -474,13 +557,12 @@ mod windows_dxgi {
             Ok(e) => {
                 stats.set_encoder_name(e.name().to_string());
                 stats.set_detail(format!(
-                    "Capture {}x{} → encode {}x{} @ {}fps / {} kbps ({})",
+                    "Capture {}x{} → encode {}x{} @ {}fps ({})",
                     backend.width,
                     backend.height,
                     e.width(),
                     e.height(),
-                    config.target_fps,
-                    config.bitrate_bps / 1000,
+                    e.target_fps(),
                     e.name()
                 ));
                 Some(e)
@@ -496,94 +578,118 @@ mod windows_dxgi {
         let mut encode_window = 0u32;
         let mut bytes_window = 0u64;
         let mut window_start = Instant::now();
-        // Cap encode rate to target_fps — capture can be 100–180 FPS on active desktop.
-        let encode_interval = Duration::from_secs_f64(1.0 / config.target_fps.max(1) as f64);
+        // Pace off the *encoder's* effective FPS (soft profile may clamp 60→30).
+        let mut encode_fps = encoder
+            .as_ref()
+            .map(|e| e.target_fps())
+            .unwrap_or(config.target_fps)
+            .max(1);
+        let mut encode_interval = Duration::from_secs_f64(1.0 / encode_fps as f64);
         let mut last_encode = Instant::now() - encode_interval;
         let mut last_idr = Instant::now();
-        // Prefer low latency when a client is connected: IDR more often for recovery.
+        let mut next_encode_deadline = Instant::now();
+        let mut have_desktop = false;
+        // Capture size we built the encoder for (soft profile may clamp below resolve_encode_size).
+        let mut encoder_for_cap = (backend.width, backend.height);
 
         while !stop.load(Ordering::Relaxed) {
             let t0 = Instant::now();
-            match backend.capture_bgra() {
+            // Only Map GPU→CPU when we are about to encode. Mapping every DXGI frame
+            // is why this felt nothing like Sunshine on the same PC.
+            let should_encode =
+                last_encode.elapsed() >= encode_interval || t0 >= next_encode_deadline;
+            match backend.capture_bgra(should_encode) {
                 Ok(Some((w, h))) => {
                     let capture_us = t0.elapsed().as_micros() as u64;
                     stats.record_frame(w, h, capture_us);
                     frames_window += 1;
+                    have_desktop = true;
 
-                    let should_encode = last_encode.elapsed() >= encode_interval;
-                    if should_encode {
-                        if let Some(ref mut enc) = encoder {
-                            if let Some(ref sink) = video_sink {
-                                // IDR on Accept + periodic IDR while streaming (lost-packet recovery).
-                                let need_idr = sink.take_force_keyframe()
-                                    || (sink.has_peer()
-                                        && last_idr.elapsed() >= Duration::from_secs(1));
-                                if need_idr {
-                                    enc.force_keyframe();
-                                    last_idr = Instant::now();
-                                }
-                            }
-
-                            // Recreate encoder if desired encode size changed
-                            let (want_w, want_h) = config.resolve_encode_size(w, h);
-                            if want_w != enc.width() || want_h != enc.height() {
-                                match create_encoder(EncoderSettings {
-                                    width: want_w,
-                                    height: want_h,
-                                    fps: config.target_fps,
-                                    bitrate_bps: config.bitrate_bps,
-                                    encoder_id: config.encoder_id.clone(),
-                                }) {
-                                    Ok(e) => {
-                                        stats.set_encoder_name(e.name().to_string());
-                                        *enc = e;
-                                    }
-                                    Err(_) => {}
-                                }
-                            }
-
-                            let t1 = Instant::now();
-                            let scaled = if w == enc.width() && h == enc.height() {
-                                None
-                            } else {
-                                Some(scale_bgra_nn(
-                                    &backend.bgra,
+                    // Recreate only when capture geometry changes — not when soft clamp ≠ settings.
+                    if (w, h) != encoder_for_cap {
+                        let (ew, eh) = config.resolve_encode_size(w, h);
+                        match create_encoder(EncoderSettings {
+                            width: ew,
+                            height: eh,
+                            fps: config.target_fps,
+                            bitrate_bps: config.bitrate_bps,
+                            encoder_id: config.encoder_id.clone(),
+                        }) {
+                            Ok(e) => {
+                                encode_fps = e.target_fps().max(1);
+                                encode_interval =
+                                    Duration::from_secs_f64(1.0 / encode_fps as f64);
+                                stats.set_encoder_name(e.name().to_string());
+                                stats.set_detail(format!(
+                                    "Capture {}x{} → encode {}x{} @ {}fps ({})",
                                     w,
                                     h,
-                                    enc.width(),
-                                    enc.height(),
-                                ))
-                            };
-                            let pixels: &[u8] = scaled.as_deref().unwrap_or(&backend.bgra);
-
-                            match enc.encode_bgra(pixels, t0.elapsed().as_micros() as u64) {
-                                Ok(Some(frame)) => {
-                                    let encode_us = t1.elapsed().as_micros() as u64;
-                                    stats.record_encode(
-                                        enc.width(),
-                                        enc.height(),
-                                        encode_us,
-                                        frame.data.len(),
-                                    );
-                                    encode_window += 1;
-                                    bytes_window += frame.data.len() as u64;
-                                    last_encode = Instant::now();
-                                    if let Some(ref sink) = video_sink {
-                                        sink.publish(enc.width(), enc.height(), frame);
-                                    }
-                                }
-                                Ok(None) => {
-                                    last_encode = Instant::now();
-                                }
-                                Err(e) => {
-                                    stats.set_detail(format!("Encode error: {e}"));
-                                    last_encode = Instant::now();
-                                }
+                                    e.width(),
+                                    e.height(),
+                                    e.target_fps(),
+                                    e.name()
+                                ));
+                                encoder = Some(e);
+                                encoder_for_cap = (w, h);
+                            }
+                            Err(e) => {
+                                stats.set_detail(format!("Encoder recreate failed: {e}"));
                             }
                         }
                     }
+
+                    if let Some(ref mut enc) = encoder {
+                        encode_one_frame(
+                            enc,
+                            &video_sink,
+                            &backend.bgra,
+                            w,
+                            h,
+                            &stats,
+                            &mut last_encode,
+                            &mut next_encode_deadline,
+                            encode_interval,
+                            &mut last_idr,
+                            &mut encode_window,
+                            &mut bytes_window,
+                            t0,
+                        );
+                    }
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    // DXGI idle (or discarded). Re-encode last desktop + fresh cursor so mouse
+                    // stays smooth when the wallpaper is static (Sunshine does this on GPU).
+                    if should_encode && have_desktop {
+                        if let Some(ref mut enc) = encoder {
+                            let w = backend.width;
+                            let h = backend.height;
+                            // backend.bgra still holds last mapped desktop (not overwritten on discard).
+                            encode_one_frame(
+                                enc,
+                                &video_sink,
+                                &backend.bgra,
+                                w,
+                                h,
+                                &stats,
+                                &mut last_encode,
+                                &mut next_encode_deadline,
+                                encode_interval,
+                                &mut last_idr,
+                                &mut encode_window,
+                                &mut bytes_window,
+                                t0,
+                            );
+                        }
+                    } else if should_encode {
+                        next_encode_deadline = Instant::now() + encode_interval;
+                    } else {
+                        let now = Instant::now();
+                        if now < next_encode_deadline {
+                            let wait = next_encode_deadline - now;
+                            thread::sleep(wait.min(Duration::from_millis(8)));
+                        }
+                    }
+                }
                 Err(e) if e == "ACCESS_LOST" => {
                     stats.set_detail("Display mode changed — reopening capture…");
                     let idx = backend.output_index;
@@ -593,6 +699,8 @@ mod windows_dxgi {
                     }) {
                         Ok(b) => {
                             stats.set_detail(format!("Reopened capture {}x{}", b.width, b.height));
+                            encoder_for_cap = (0, 0); // force encoder recreate next frame
+                            have_desktop = false;
                             backend = b;
                         }
                         Err(e2) => {

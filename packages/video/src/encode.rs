@@ -42,6 +42,8 @@ pub trait VideoEncoder: Send {
     fn name(&self) -> &str;
     fn width(&self) -> u32;
     fn height(&self) -> u32;
+    /// Effective encode FPS after low-latency clamps (drives capture pacing).
+    fn target_fps(&self) -> u32;
     fn encode_bgra(&mut self, bgra: &[u8], pts_us: u64) -> Result<Option<EncodedFrame>, String>;
     fn force_keyframe(&mut self);
 }
@@ -60,13 +62,16 @@ pub fn probe_encoders() -> Vec<String> {
     v
 }
 
-/// Create encoder. Prefer hardware when `auto` / vendor ids; fall back to OpenH264.
+/// Create encoder. Prefer hardware when `auto` / vendor ids; fall back to OpenH264
+/// with a **low-latency soft profile** (Sunshine-like software defaults: low res/FPS).
 pub fn create_encoder(settings: EncoderSettings) -> Result<Box<dyn VideoEncoder>, String> {
     let id = settings.encoder_id.to_ascii_lowercase();
     let want_hw = matches!(
         id.as_str(),
         "auto" | "nvenc" | "amf" | "qsv" | "hardware" | "hw" | "mf"
     );
+
+    let mut hw_err: Option<String> = None;
 
     #[cfg(windows)]
     {
@@ -76,18 +81,7 @@ pub fn create_encoder(settings: EncoderSettings) -> Result<Box<dyn VideoEncoder>
                     return Ok(Box::new(e));
                 }
                 Err(e) => {
-                    if id != "auto" && id != "hardware" && id != "hw" && id != "mf" {
-                        // Explicit HW request failed — still try soft so stream works
-                        let mut soft = settings.clone();
-                        soft.encoder_id = format!("openh264-fallback-{id}");
-                        return OpenH264Encoder::new(soft).map(|enc| {
-                            // annotate failure in name via openh264 path
-                            let _ = e;
-                            Box::new(enc) as Box<dyn VideoEncoder>
-                        });
-                    }
-                    // auto: silent fall through to software
-                    let _ = e;
+                    hw_err = Some(e);
                 }
             }
         }
@@ -98,33 +92,63 @@ pub fn create_encoder(settings: EncoderSettings) -> Result<Box<dyn VideoEncoder>
         let _ = want_hw;
     }
 
+    // Software path: clamp for weak CPUs so we don't try 1080p60 OpenH264 (that's the lag).
     let mut soft = settings;
-    if soft.encoder_id.to_ascii_lowercase() == "auto" {
+    if want_hw || soft.encoder_id.eq_ignore_ascii_case("auto") {
+        soft = soft_low_latency_profile(soft);
+        if let Some(ref e) = hw_err {
+            soft.encoder_id = format!("openh264-no-hw");
+            let mut enc = OpenH264Encoder::new(soft)?;
+            enc.name = format!(
+                "{} | HW failed: {}",
+                enc.name,
+                e.chars().take(80).collect::<String>()
+            );
+            return Ok(Box::new(enc));
+        }
         soft.encoder_id = "openh264".into();
     }
     OpenH264Encoder::new(soft).map(|e| Box::new(e) as Box<dyn VideoEncoder>)
+}
+
+/// When HW encode is unavailable: survival profile so OpenH264 can keep up.
+/// 1080p60 software is what made the stream feel broken vs Sunshine.
+fn soft_low_latency_profile(mut s: EncoderSettings) -> EncoderSettings {
+    let long = s.width.max(s.height);
+    // ~960 long edge @ 30fps — weak CPUs can actually sustain this
+    if long > 960 {
+        let scale = 960.0 / long as f32;
+        s.width = ((s.width as f32 * scale) as u32).max(2) & !1;
+        s.height = ((s.height as f32 * scale) as u32).max(2) & !1;
+    }
+    s.fps = s.fps.min(30);
+    s.bitrate_bps = s.bitrate_bps.min(6_000_000).max(1_500_000);
+    s
 }
 
 struct OpenH264Encoder {
     encoder: Encoder,
     width: u32,
     height: u32,
+    fps: u32,
     force_idr: bool,
     ready: bool,
-    name: String,
+    pub(crate) name: String,
 }
 
 impl OpenH264Encoder {
     fn new(settings: EncoderSettings) -> Result<Self, String> {
         let w = settings.width.max(16) & !1;
         let h = settings.height.max(16) & !1;
+        let fps = settings.fps.max(1);
 
         let api = OpenH264API::from_source();
+        // Realtime screen: allow frame skip under load (keeps latency from exploding).
         let cfg = EncoderConfig::new()
-            .max_frame_rate(settings.fps.max(1) as f32)
-            .set_bitrate_bps(settings.bitrate_bps.max(2_000_000))
+            .max_frame_rate(fps as f32)
+            .set_bitrate_bps(settings.bitrate_bps.max(1_500_000))
             .usage_type(UsageType::ScreenContentRealTime)
-            .enable_skip_frame(false)
+            .enable_skip_frame(true)
             .set_multiple_thread_idc(0);
 
         let encoder = Encoder::with_api_config(api, cfg)
@@ -134,19 +158,16 @@ impl OpenH264Encoder {
             encoder,
             width: w,
             height: h,
+            fps,
             force_idr: false,
             ready: false,
-            name: if settings.encoder_id.starts_with("openh264-fallback-") {
-                let hw = settings
-                    .encoder_id
-                    .strip_prefix("openh264-fallback-")
-                    .unwrap_or("hw");
+            name: if settings.encoder_id.contains("no-hw") {
                 format!(
-                    "openh264 {}x{}@{} (fallback; {hw} MFT unavailable)",
-                    w, h, settings.fps
+                    "openh264 {}x{}@{} soft (no HW — Sunshine uses QSV/NVENC on GPU)",
+                    w, h, fps
                 )
             } else {
-                format!("openh264 {}x{}@{} software", w, h, settings.fps)
+                format!("openh264 {}x{}@{} software", w, h, fps)
             },
         })
     }
@@ -161,6 +182,9 @@ impl VideoEncoder for OpenH264Encoder {
     }
     fn height(&self) -> u32 {
         self.height
+    }
+    fn target_fps(&self) -> u32 {
+        self.fps
     }
     fn force_keyframe(&mut self) {
         self.force_idr = true;
@@ -205,9 +229,37 @@ impl VideoEncoder for OpenH264Encoder {
     }
 }
 
-/// Bilinear scale BGRA → even destination (much sharper than nearest-neighbor).
+/// Fast nearest-neighbor scale for the encode hot path (latency over polish).
+/// Bilinear is nicer but costs several ms on weak CPUs — that is pure glass-to-glass lag.
 pub fn scale_bgra_nn(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
-    scale_bgra_bilinear(src, src_w, src_h, dst_w, dst_h)
+    scale_bgra_nearest(src, src_w, src_h, dst_w, dst_h)
+}
+
+/// Nearest-neighbor BGRA scale (even dest). Used on the stream encode path.
+pub fn scale_bgra_nearest(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
+    let dst_w = dst_w.max(2) & !1;
+    let dst_h = dst_h.max(2) & !1;
+    let mut out = vec![0u8; (dst_w * dst_h * 4) as usize];
+    if src_w == 0 || src_h == 0 || src.len() < (src_w * src_h * 4) as usize {
+        return out;
+    }
+    if src_w == dst_w && src_h == dst_h {
+        let n = out.len().min(src.len());
+        out[..n].copy_from_slice(&src[..n]);
+        return out;
+    }
+    for y in 0..dst_h {
+        let sy = (y as u64 * src_h as u64 / dst_h as u64) as u32;
+        let sy = sy.min(src_h - 1);
+        for x in 0..dst_w {
+            let sx = (x as u64 * src_w as u64 / dst_w as u64) as u32;
+            let sx = sx.min(src_w - 1);
+            let si = ((sy * src_w + sx) * 4) as usize;
+            let di = ((y * dst_w + x) * 4) as usize;
+            out[di..di + 4].copy_from_slice(&src[si..si + 4]);
+        }
+    }
+    out
 }
 
 pub fn scale_bgra_bilinear(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {

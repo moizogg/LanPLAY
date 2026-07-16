@@ -19,12 +19,12 @@ import type {
 
 const DEFAULT_VIDEO: VideoSettings = {
   outputIndex: 0,
-  fps: 60,
-  bitrateKbps: 25000,
+  fps: 30,
+  bitrateKbps: 8000,
   resolutionMode: "auto",
-  maxEdge: 1920,
-  width: 1920,
-  height: 1080,
+  maxEdge: 1280,
+  width: 1280,
+  height: 720,
   encoder: "auto",
 };
 
@@ -91,6 +91,7 @@ export default function App() {
     useState<VideoSettings>(DEFAULT_VIDEO);
   const [encoderOptions, setEncoderOptions] = useState<EncoderOption[]>([]);
   const [resPresets, setResPresets] = useState<ResolutionPreset[]>([]);
+  const [hwProbe, setHwProbe] = useState<string>("");
   const [settingsSaved, setSettingsSaved] = useState<string | null>(null);
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateStatus | null>(null);
@@ -138,14 +139,16 @@ export default function App() {
 
   const loadSettings = useCallback(async () => {
     try {
-      const [vs, enc, presets] = await Promise.all([
+      const [vs, enc, presets, probe] = await Promise.all([
         invoke<VideoSettings>("get_video_settings"),
         invoke<EncoderOption[]>("get_encoder_options"),
         invoke<ResolutionPreset[]>("get_resolution_presets"),
+        invoke<string>("get_hardware_encoder_probe"),
       ]);
       setVideoSettings(vs);
       setEncoderOptions(enc);
       setResPresets(presets);
+      setHwProbe(probe);
       setSettingsDirty(false);
     } catch (e) {
       setError(String(e));
@@ -718,6 +721,11 @@ export default function App() {
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                 Encoder
               </p>
+              {hwProbe && (
+                <p className="rounded-lg border border-white/10 bg-black/40 px-3 py-2 font-mono text-[11px] text-slate-400">
+                  Probe: {hwProbe}
+                </p>
+              )}
               <div className="space-y-2">
                 {encoderOptions.map((enc) => (
                   <label
@@ -1008,16 +1016,17 @@ export default function App() {
                 {desktopCapture?.detail ?? "Start Host to begin capture+encode."}
               </p>
               <p className="mt-1 text-[11px] text-slate-600">
-                H.264 encoded in memory — not streamed yet (Phase 6). Tune res /
-                FPS / bitrate / encoder in the{" "}
+                Check Encoder line: if it says openh264/soft, you are on CPU
+                (lag). Sunshine on HD 4000 uses QSV on the GPU — we only get that
+                when Probe shows a HW MFT. Tune res / FPS in{" "}
                 <button
                   type="button"
                   className="text-cyan-400/90 underline-offset-2 hover:underline"
                   onClick={() => setMode("settings")}
                 >
                   Settings
-                </button>{" "}
-                tab.
+                </button>
+                .
               </p>
             </div>
 

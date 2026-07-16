@@ -154,6 +154,11 @@ fn get_encoder_options() -> Vec<EncoderOption> {
 }
 
 #[tauri::command]
+fn get_hardware_encoder_probe() -> String {
+    lanplay_video::hardware_encoder_probe()
+}
+
+#[tauri::command]
 fn get_resolution_presets() -> Vec<ResolutionPreset> {
     resolution_presets()
 }
@@ -195,6 +200,7 @@ pub fn run() {
             get_video_settings,
             set_video_settings,
             get_encoder_options,
+            get_hardware_encoder_probe,
             get_resolution_presets,
             check_for_update,
             apply_update,

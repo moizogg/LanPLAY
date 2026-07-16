@@ -19,6 +19,19 @@ pub use settings::{
     list_encoder_options, resolution_presets, EncoderOption, ResolutionMode, ResolutionPreset,
     VideoSettings,
 };
+
+/// Human-readable hardware encoder probe (why software?).
+pub fn hardware_encoder_probe() -> String {
+    #[cfg(windows)]
+    {
+        let _ = crate::mf_h264::hardware_h264_available();
+        crate::mf_h264::last_probe_detail()
+    }
+    #[cfg(not(windows))]
+    {
+        "Hardware encode only on Windows.".into()
+    }
+}
 pub use stats::{AtomicCaptureStats, CaptureSnapshot};
 pub use stream::{
     run_client_video_loop, ClientVideoHandle, ClientVideoSnapshot, VideoSenderHandle,
