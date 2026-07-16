@@ -186,7 +186,8 @@ pub fn scale_bgra_bilinear(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h
         return out;
     }
     if src_w == dst_w && src_h == dst_h {
-        out.copy_from_slice(&src[..out.len().min(src.len())]);
+        let n = out.len().min(src.len());
+        out[..n].copy_from_slice(&src[..n]);
         return out;
     }
     let x_ratio = (src_w.saturating_sub(1)) as f32 / dst_w.max(1) as f32;
