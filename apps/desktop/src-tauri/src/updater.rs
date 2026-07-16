@@ -107,13 +107,18 @@ pub fn check_for_update() -> UpdateStatus {
         Ok(body) => match serde_json::from_str::<GhRelease>(&body) {
             Ok(rel) => {
                 let latest_sha = parse_sha_from_release(&rel);
-                let asset = pick_zip_asset(&rel);
-                let update_available = match (&latest_sha, asset.is_some()) {
+                let asset_url = pick_zip_asset(&rel).map(|a| a.browser_download_url.clone());
+                let asset_mb = pick_zip_asset(&rel).map(|a| a.size / 1_000_000).unwrap_or(0);
+                let latest_name = rel.name.clone().or(rel.tag_name.clone());
+                let has_asset = asset_url.is_some();
+                let update_available = match (&latest_sha, has_asset) {
                     (Some(latest), true) => {
                         let cur = current_sha.to_lowercase();
                         let lat = latest.to_lowercase();
                         // dev builds always offer; otherwise compare short SHAs
-                        cur == "dev" || cur.is_empty() || !(lat.starts_with(&cur) || cur.starts_with(&lat))
+                        cur == "dev"
+                            || cur.is_empty()
+                            || !(lat.starts_with(&cur) || cur.starts_with(&lat))
                     }
                     (None, true) => current_sha == "dev",
                     _ => false,
@@ -123,17 +128,17 @@ pub fn check_for_update() -> UpdateStatus {
                     current_sha: current_sha.clone(),
                     current_version,
                     latest_sha: latest_sha.clone(),
-                    latest_name: rel.name.or(rel.tag_name),
-                    download_url: asset.map(|a| a.browser_download_url.clone()),
+                    latest_name,
+                    download_url: asset_url,
                     update_available,
                     detail: if update_available {
                         format!(
                             "Update available: {} → {} ({} MB)",
                             current_sha,
                             latest_sha.as_deref().unwrap_or("?"),
-                            asset.map(|a| a.size / 1_000_000).unwrap_or(0)
+                            asset_mb
                         )
-                    } else if asset.is_none() {
+                    } else if !has_asset {
                         "Nightly release has no zip asset yet.".into()
                     } else {
                         format!("You're on the latest nightly ({current_sha}).")
