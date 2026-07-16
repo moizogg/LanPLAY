@@ -202,11 +202,11 @@ pub fn scale_bgra_bilinear(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h
             let x1 = (x0 + 1).min(src_w - 1);
             let wx = fx - x0 as f32;
             let di = ((y * dst_w + x) * 4) as usize;
-            for c in 0..4 {
-                let i00 = ((y0 * src_w + x0) * 4 + c) as usize;
-                let i10 = ((y0 * src_w + x1) * 4 + c) as usize;
-                let i01 = ((y1 * src_w + x0) * 4 + c) as usize;
-                let i11 = ((y1 * src_w + x1) * 4 + c) as usize;
+            for c in 0usize..4 {
+                let i00 = ((y0 * src_w + x0) * 4) as usize + c;
+                let i10 = ((y0 * src_w + x1) * 4) as usize + c;
+                let i01 = ((y1 * src_w + x0) * 4) as usize + c;
+                let i11 = ((y1 * src_w + x1) * 4) as usize + c;
                 let top = src[i00] as f32 * (1.0 - wx) + src[i10] as f32 * wx;
                 let bot = src[i01] as f32 * (1.0 - wx) + src[i11] as f32 * wx;
                 out[di + c] = (top * (1.0 - wy) + bot * wy).round().clamp(0.0, 255.0) as u8;
