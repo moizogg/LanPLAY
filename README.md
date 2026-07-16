@@ -108,7 +108,7 @@ You can also re-run builds via **Actions → CI → Run workflow**.
 | Before (slow) | Now |
 |---------------|-----|
 | `cargo test` (full **debug** compile) + `tauri build` (full **release** compile) = **2× work** | **One** release compile only |
-| NSIS installer every time | **exe only** by default (`--bundles none`) |
+| NSIS installer every time | **exe only** by default (`--no-bundle`) |
 | Rebuild ViGEm every run | **Cached** after first fetch |
 | Rust crates recompiled from scratch | **rust-cache** shared key `lanplay-win-release` |
 

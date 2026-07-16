@@ -77,16 +77,17 @@ jobs:
         run: cargo test --workspace
 
       # Single release compile. Skip NSIS unless requested (setup packaging is extra time).
+      # Tauri v2: --no-bundle (NOT --bundles none; that's v1-only).
       # Frontend is built via tauri.conf beforeBuildCommand — no separate npm run build.
       - name: Tauri build (exe only)
-        if: ${{ inputs.full_installer != true }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.full_installer != true }}
         working-directory: apps/desktop
-        run: npm run tauri build -- --bundles none
+        run: npm run tauri build -- --no-bundle --ci
 
       - name: Tauri build (exe + NSIS installer)
-        if: ${{ inputs.full_installer == true }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_installer == true }}
         working-directory: apps/desktop
-        run: npm run tauri build
+        run: npm run tauri build -- --ci
 
       - name: Locate build outputs
         shell: pwsh
