@@ -7,11 +7,14 @@ description = "Desktop capture, encode, decode, present (Phase 4–5+)"
 
 [dependencies]
 lanplay-shared = { path = "../shared" }
+lanplay-protocol = { path = "../protocol" }
 serde = { workspace = true, features = ["derive"] }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
-# Phase 5: always-available H.264 (software). HW NVENC/AMF/QSV via MF later.
+# Phase 5–6: software H.264 encode/decode. HW NVENC/AMF/QSV later.
 openh264 = "0.6"
+# Client UI preview (decode → JPEG for Tauri bridge).
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

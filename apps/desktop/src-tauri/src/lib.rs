@@ -7,8 +7,8 @@ use lanplay_controllers::{CaptureStatus, VigemBundleStatus};
 use lanplay_protocol::PROTOCOL_VERSION;
 use lanplay_shared::{ClientStatus, ControllerStats, HostStatus, TailscaleInfo};
 use lanplay_video::{
-    list_encoder_options, resolution_presets, CaptureSnapshot, EncoderOption, ResolutionPreset,
-    VideoSettings,
+    list_encoder_options, resolution_presets, CaptureSnapshot, ClientVideoSnapshot, EncoderOption,
+    ResolutionPreset, VideoSettings,
 };
 use session::SessionManager;
 use tauri::Manager;
@@ -20,7 +20,7 @@ fn get_app_info() -> serde_json::Value {
         "name": "LANPlay",
         "version": env!("CARGO_PKG_VERSION"),
         "protocolVersion": PROTOCOL_VERSION,
-        "phase": 5,
+        "phase": 6,
     })
 }
 
@@ -118,6 +118,11 @@ fn get_capture_stats(session: State<'_, SessionManager>) -> CaptureSnapshot {
 }
 
 #[tauri::command]
+fn get_client_video(session: State<'_, SessionManager>) -> ClientVideoSnapshot {
+    session.get_client_video()
+}
+
+#[tauri::command]
 fn get_video_settings(session: State<'_, SessionManager>) -> VideoSettings {
     session.get_video_settings()
 }
@@ -173,6 +178,7 @@ pub fn run() {
             set_input_capture,
             toggle_input_capture,
             get_capture_stats,
+            get_client_video,
             get_video_settings,
             set_video_settings,
             get_encoder_options,

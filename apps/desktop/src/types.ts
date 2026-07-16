@@ -125,3 +125,15 @@ export interface ResolutionPreset {
   height: number;
   maxEdge: number;
 }
+
+/** Client-side decoded stream preview (Phase 6) */
+export interface ClientVideoSnapshot {
+  active: boolean;
+  width: number;
+  height: number;
+  fps: number;
+  frames: number;
+  packets: number;
+  jpegBase64: string;
+  detail: string;
+}

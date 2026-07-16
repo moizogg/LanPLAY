@@ -6,6 +6,7 @@ import type {
   CaptureSnapshot,
   CaptureStatus,
   ClientStatus,
+  ClientVideoSnapshot,
   ControllerStats,
   EncoderOption,
   HostStatus,
@@ -75,6 +76,9 @@ export default function App() {
   const [desktopCapture, setDesktopCapture] = useState<CaptureSnapshot | null>(
     null,
   );
+  const [clientVideo, setClientVideo] = useState<ClientVideoSnapshot | null>(
+    null,
+  );
   const [hostIp, setHostIp] = useState("");
   const [controlPort, setControlPort] = useState(47800);
   const [mediaPort, setMediaPort] = useState(47801);
@@ -92,18 +96,20 @@ export default function App() {
   /** Session/controller metrics only — safe to poll often (no external CLI). */
   const refreshLive = useCallback(async () => {
     try {
-      const [h, c, st, cap, desk] = await Promise.all([
+      const [h, c, st, cap, desk, vid] = await Promise.all([
         invoke<HostStatus>("get_host_status"),
         invoke<ClientStatus>("get_client_status"),
         invoke<ControllerStats>("get_controller_stats"),
         invoke<CaptureStatus>("get_input_capture"),
         invoke<CaptureSnapshot>("get_capture_stats"),
+        invoke<ClientVideoSnapshot>("get_client_video"),
       ]);
       setHost(h);
       setClient(c);
       setStats(st);
       setCapture(cap);
       setDesktopCapture(desk);
+      setClientVideo(vid);
       setControlPort(h.controlPort);
       setMediaPort(h.mediaPort);
     } catch (e) {
@@ -1040,6 +1046,40 @@ export default function App() {
               </p>
             )}
 
+            {/* Phase 6: remote desktop preview */}
+            {clientActive && (
+              <div className="overflow-hidden rounded-xl border border-white/10 bg-black/50">
+                <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Remote video (Phase 6)
+                  </p>
+                  <p className="font-mono text-[11px] text-slate-400">
+                    {clientVideo?.active
+                      ? `${clientVideo.width}×${clientVideo.height} · ${clientVideo.fps.toFixed(1)} FPS · ${clientVideo.frames}f`
+                      : "idle"}
+                  </p>
+                </div>
+                <div className="relative flex min-h-[200px] items-center justify-center bg-black">
+                  {clientVideo?.jpegBase64 ? (
+                    <img
+                      src={`data:image/jpeg;base64,${clientVideo.jpegBase64}`}
+                      alt="Host stream"
+                      className="max-h-[360px] w-full object-contain"
+                    />
+                  ) : (
+                    <p className="px-4 py-12 text-center text-sm text-slate-500">
+                      {clientVideo?.detail ??
+                        "Waiting for host video after Accept…"}
+                    </p>
+                  )}
+                </div>
+                <p className="border-t border-white/5 px-3 py-2 text-[11px] text-slate-600">
+                  {clientVideo?.detail ?? "—"} · packets{" "}
+                  {clientVideo?.packets ?? 0} · UDP port {mediaPort + 1}
+                </p>
+              </div>
+            )}
+
             {client?.state === "streaming" && (
               <div
                 className={`rounded-xl border p-4 ${
@@ -1119,11 +1159,11 @@ export default function App() {
 
         <footer className="mt-auto space-y-1 text-xs text-slate-600">
           <p>
-            Settings control host capture/encode. Client still receives input
-            only — video stream is Phase 6.
+            Phase 6: host encodes H.264 → UDP (media+1) → client decode +
+            preview. Settings still set host encode quality.
           </p>
           <p>
-            Current encode plan:{" "}
+            Encode plan:{" "}
             <span className="font-mono text-slate-500">
               {videoSettings.resolutionMode === "auto"
                 ? `auto≤${videoSettings.maxEdge}`

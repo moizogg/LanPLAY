@@ -1,11 +1,13 @@
-//! Video pipeline (Phase 4–5).
+//! Video pipeline (Phase 4–6).
 //!
-//! Capture → encode (H.264) → (Phase 6: network → decode → present).
+//! Capture → encode (H.264) → stream → decode → present.
 
 mod capture;
+mod decode;
 mod encode;
 mod settings;
 mod stats;
+mod stream;
 
 pub use capture::{run_host_capture_loop, CaptureBackend, CaptureConfig, HostCaptureHandle};
 pub use encode::{create_encoder, probe_encoders, EncoderSettings, VideoEncoder};
@@ -14,3 +16,7 @@ pub use settings::{
     VideoSettings,
 };
 pub use stats::{AtomicCaptureStats, CaptureSnapshot};
+pub use stream::{
+    run_client_video_loop, ClientVideoHandle, ClientVideoSnapshot, VideoSenderHandle,
+    VideoStreamSink,
+};

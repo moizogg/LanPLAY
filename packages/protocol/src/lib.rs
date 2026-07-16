@@ -2,6 +2,7 @@
 
 mod input_packet;
 mod kbm_packet;
+mod video_packet;
 
 pub use input_packet::{
     DecodeError as InputDecodeError, InputPacket, FLAG_CONNECTED, INPUT_PACKET_MAGIC,
@@ -10,6 +11,11 @@ pub use input_packet::{
 pub use kbm_packet::{
     DecodeError as KbmDecodeError, KbmPacket, KBM_FLAG_LBUTTON, KBM_FLAG_MBUTTON, KBM_FLAG_RBUTTON,
     KBM_PACKET_MAGIC, KBM_PACKET_SIZE, KBM_PACKET_VERSION,
+};
+pub use video_packet::{
+    fragment_access_unit, FrameReassembler, ReassembledFrame, VideoFragmentHeader,
+    VIDEO_FLAG_KEYFRAME, VIDEO_HEADER_SIZE, VIDEO_MAX_PAYLOAD, VIDEO_PACKET_MAGIC,
+    VIDEO_PACKET_VERSION,
 };
 
 /// Protocol major — bump when packets become incompatible.

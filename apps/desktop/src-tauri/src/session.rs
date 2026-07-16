@@ -1,5 +1,6 @@
-//! Session: join accept/reject + UDP input after approval + live disconnect.
+//! Session: join accept/reject + UDP input + video stream (Phase 6).
 
+use crate::settings_store;
 use lanplay_controllers::{
     poll_xinput, probe_vigem, run_client_input_loop, run_host_input_loop, CaptureStatus,
     ClientInputHandle, HostInputConfig, HostInputHandle,
@@ -9,11 +10,15 @@ use lanplay_networking::{
     ClientControlSession, HostJoinHandle, JoinDecision,
 };
 use lanplay_shared::{
-    ClientStatus, ControllerStats, HostStatus, PendingJoinInfo, SessionState,
+    video_port_from_media, ClientStatus, ControllerStats, HostStatus, PendingJoinInfo,
+    SessionState,
 };
-use lanplay_video::{run_host_capture_loop, CaptureSnapshot, HostCaptureHandle, VideoSettings};
-use crate::settings_store;
+use lanplay_video::{
+    run_client_video_loop, run_host_capture_loop, CaptureSnapshot, ClientVideoHandle,
+    ClientVideoSnapshot, HostCaptureHandle, VideoSenderHandle, VideoSettings, VideoStreamSink,
+};
 use parking_lot::Mutex;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,8 +33,11 @@ struct SessionInner {
     host_input: Option<HostInputHandle>,
     host_join: Option<HostJoinHandle>,
     host_capture: Option<HostCaptureHandle>,
+    host_video_sink: Option<VideoStreamSink>,
+    host_video_sender: Option<VideoSenderHandle>,
     client_input: Option<ClientInputHandle>,
     client_control: Option<ClientControlSession>,
+    client_video: Option<ClientVideoHandle>,
     allow_remote_input: bool,
 }
 
@@ -65,8 +73,11 @@ impl Default for SessionInner {
             host_input: None,
             host_join: None,
             host_capture: None,
+            host_video_sink: None,
+            host_video_sender: None,
             client_input: None,
             client_control: None,
+            client_video: None,
             allow_remote_input: true,
         }
     }
@@ -166,13 +177,17 @@ impl SessionManager {
             }
         };
 
-        // Phase 5: capture + encode using Settings tab (applies on Start Host)
+        // Phase 5–6: capture + encode + video sink (streams after Accept)
         let video = settings_store::get();
         let capture_cfg = video.to_capture_config();
-        let capture_handle = run_host_capture_loop(capture_cfg).ok();
+        let video_sink = VideoStreamSink::new();
+        let video_sender = video_sink.clone().start_sender().ok();
+        let capture_handle =
+            run_host_capture_loop(capture_cfg, Some(video_sink.clone())).ok();
 
         let vigem_ok = input_handle.vigem_ok();
         let vigem_detail = input_handle.vigem_detail().to_string();
+        let vport = video_port_from_media(media);
 
         inner.host.vigem_ok = vigem_ok;
         inner.host.state = SessionState::Listening;
@@ -184,13 +199,15 @@ impl SessionManager {
             lanplay_video::ResolutionMode::Fixed => format!("{}x{}", video.width, video.height),
         };
         inner.host.message = format!(
-            "Listening :{control}/:{media}. Encode {res_label} @ {}fps / {}kbps ({}) — Phase 5. Accept joins. {vigem_detail}",
-            video.fps, video.bitrate_kbps, video.encoder
+            "Listening :{control}/input :{media}/video :{vport}. Encode {res_label} @ {}fps / {}kbps. Accept joins. {vigem_detail}",
+            video.fps, video.bitrate_kbps
         );
 
         inner.host_join = Some(join_handle);
         inner.host_input = Some(input_handle);
         inner.host_capture = capture_handle;
+        inner.host_video_sink = Some(video_sink);
+        inner.host_video_sender = video_sender;
         Ok(inner.host.clone())
     }
 
@@ -205,6 +222,12 @@ impl SessionManager {
         }
         if let Some(c) = inner.host_capture.take() {
             c.stop();
+        }
+        if let Some(s) = inner.host_video_sender.take() {
+            s.stop();
+        }
+        if let Some(sink) = inner.host_video_sink.take() {
+            sink.set_peer(None);
         }
         inner.host.state = SessionState::Idle;
         inner.host.packets_received = 0;
@@ -232,12 +255,25 @@ impl SessionManager {
         if accept {
             inner.host.session_active = true;
             inner.host.state = SessionState::Streaming;
-            inner.host.message = format!(
-                "{msg}. Client can send keyboard/mouse. Virtual pad only after their controller is stable."
-            );
+            // Point video UDP at accepted peer (media_port + 1).
+            if let Some(ip) = join.allowed_peer().lock().clone() {
+                let vport = video_port_from_media(inner.host.media_port);
+                let addr = SocketAddr::new(ip, vport);
+                if let Some(ref sink) = inner.host_video_sink {
+                    sink.set_peer(Some(addr));
+                }
+                inner.host.message = format!(
+                    "{msg}. Streaming video → {addr}. Client KBM/pad live; pad plugs when controller is stable."
+                );
+            } else {
+                inner.host.message = format!("{msg}. Session active (video peer unresolved).");
+            }
         } else {
             inner.host.session_active = false;
             inner.host.state = SessionState::Listening;
+            if let Some(ref sink) = inner.host_video_sink {
+                sink.set_peer(None);
+            }
             inner.host.message = format!("{msg}. Still listening for another join.");
         }
         Ok(inner.host.clone())
@@ -318,8 +354,24 @@ impl SessionManager {
             inner.client.host_ip = Some(ip.clone());
             inner.client.control_port = control_port;
             inner.client.media_port = media_port;
-            inner.client.message =
-                format!("Requesting to join {ip}… waiting for host to Accept or Reject.");
+            // Bind video port early so we don't miss the post-Accept IDR.
+            let vport = video_port_from_media(media_port);
+            if let Some(old) = inner.client_video.take() {
+                old.stop();
+            }
+            match run_client_video_loop(vport) {
+                Ok(vh) => {
+                    inner.client_video = Some(vh);
+                    inner.client.message = format!(
+                        "Requesting to join {ip}… video listen :{vport}. Waiting for Accept."
+                    );
+                }
+                Err(e) => {
+                    inner.client.message = format!(
+                        "Requesting to join {ip}… (video bind failed: {e}). Waiting for Accept."
+                    );
+                }
+            }
         }
 
         let mgr = self.inner.clone();
@@ -335,11 +387,15 @@ impl SessionManager {
                     if let Ok(ctrl) = join_result {
                         ctrl.stop();
                     }
+                    if let Some(v) = inner.client_video.take() {
+                        v.stop();
+                    }
                     return;
                 }
                 match join_result {
                     Ok(ctrl) => {
                         let alive = ctrl.alive_flag();
+                        let vport = video_port_from_media(media_port);
                         match run_client_input_loop(ip_bg.clone(), media_port, 250, alive) {
                             Ok(handle) => {
                                 inner.client_control = Some(ctrl);
@@ -347,11 +403,21 @@ impl SessionManager {
                                 inner.client.state = SessionState::Streaming;
                                 let pad = poll_xinput(0).connected;
                                 inner.client.local_pad_connected = pad;
-                                inner.client.message = format!(
-                                    "Host accepted! Live to {ip_bg}. (Session ends if host stops.)"
-                                );
+                                let video_ok = inner.client_video.is_some();
+                                inner.client.message = if video_ok {
+                                    format!(
+                                        "Host accepted! Video :{vport} + input → {ip_bg}."
+                                    )
+                                } else {
+                                    format!(
+                                        "Host accepted (input only). Video port :{vport} failed earlier."
+                                    )
+                                };
                             }
                             Err(e) => {
+                                if let Some(v) = inner.client_video.take() {
+                                    v.stop();
+                                }
                                 ctrl.stop();
                                 inner.client.state = SessionState::Error;
                                 inner.client.message = e.to_string();
@@ -359,6 +425,9 @@ impl SessionManager {
                         }
                     }
                     Err(reason) => {
+                        if let Some(v) = inner.client_video.take() {
+                            v.stop();
+                        }
                         inner.client.state = SessionState::Error;
                         inner.client.message = format!("Join failed: {reason}");
                     }
@@ -377,11 +446,32 @@ impl SessionManager {
         if let Some(c) = inner.client_control.take() {
             c.stop();
         }
+        if let Some(v) = inner.client_video.take() {
+            v.stop();
+        }
         inner.client.state = SessionState::Idle;
         inner.client.packets_sent = 0;
         inner.client.last_seq = 0;
         inner.client.message = "Disconnected.".into();
         Ok(inner.client.clone())
+    }
+
+    pub fn get_client_video(&self) -> ClientVideoSnapshot {
+        let inner = self.inner.lock();
+        if let Some(ref v) = inner.client_video {
+            v.snapshot()
+        } else {
+            ClientVideoSnapshot {
+                active: false,
+                width: 0,
+                height: 0,
+                fps: 0.0,
+                frames: 0,
+                packets: 0,
+                jpeg_base64: String::new(),
+                detail: "Join a host to receive video.".into(),
+            }
+        }
     }
 
     /// Moonlight-style capture toggle for client KBM.

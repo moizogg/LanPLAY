@@ -9,6 +9,15 @@ pub const DEFAULT_CONTROL_PORT: u16 = 47800;
 /// Default media/input UDP port (controller + KBM after accept).
 pub const DEFAULT_MEDIA_PORT: u16 = 47801;
 
+/// Default video UDP port (host → client H.264 fragments). Convention: media + 1.
+pub const DEFAULT_VIDEO_PORT: u16 = 47802;
+
+/// Video listen port derived from media/input port.
+#[inline]
+pub fn video_port_from_media(media_port: u16) -> u16 {
+    media_port.saturating_add(1)
+}
+
 /// App role selected in the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

@@ -1,11 +1,12 @@
-//! Desktop capture + encode loop (Phase 4–5).
+//! Desktop capture + encode loop (Phase 4–6).
 //!
-//! Windows: DXGI Desktop Duplication → staging BGRA → H.264 encode.
+//! Windows: DXGI Desktop Duplication → staging BGRA → H.264 encode → optional stream sink.
 
 use crate::encode::{
     choose_encode_size, create_encoder, scale_bgra_nn, EncoderSettings, VideoEncoder,
 };
 use crate::stats::AtomicCaptureStats;
+use crate::stream::VideoStreamSink;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -83,8 +84,11 @@ impl Drop for HostCaptureHandle {
     }
 }
 
-/// Start host capture + encode loop (Phase 5 — no network stream yet).
-pub fn run_host_capture_loop(config: CaptureConfig) -> lanplay_shared::Result<HostCaptureHandle> {
+/// Start host capture + encode loop; optional `video_sink` streams H.264 to client (Phase 6).
+pub fn run_host_capture_loop(
+    config: CaptureConfig,
+    video_sink: Option<VideoStreamSink>,
+) -> lanplay_shared::Result<HostCaptureHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(AtomicCaptureStats::default());
     let stop_t = Arc::clone(&stop);
@@ -93,7 +97,7 @@ pub fn run_host_capture_loop(config: CaptureConfig) -> lanplay_shared::Result<Ho
     let join = thread::Builder::new()
         .name("lanplay-host-capture-encode".into())
         .spawn(move || {
-            capture_encode_loop(config, stop_t, stats_t);
+            capture_encode_loop(config, video_sink, stop_t, stats_t);
         })
         .map_err(|e| lanplay_shared::LanPlayError::Message(e.to_string()))?;
 
@@ -106,6 +110,7 @@ pub fn run_host_capture_loop(config: CaptureConfig) -> lanplay_shared::Result<Ho
 
 fn capture_encode_loop(
     config: CaptureConfig,
+    video_sink: Option<VideoStreamSink>,
     stop: Arc<AtomicBool>,
     stats: Arc<AtomicCaptureStats>,
 ) {
@@ -114,12 +119,12 @@ fn capture_encode_loop(
 
     #[cfg(windows)]
     {
-        windows_dxgi::run(config, stop, stats);
+        windows_dxgi::run(config, video_sink, stop, stats);
     }
 
     #[cfg(not(windows))]
     {
-        let _ = config;
+        let _ = (config, video_sink);
         stats.set_detail("Capture/encode only supported on Windows.");
         while !stop.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(200));
@@ -310,7 +315,12 @@ mod windows_dxgi {
         }
     }
 
-    pub fn run(config: CaptureConfig, stop: Arc<AtomicBool>, stats: Arc<AtomicCaptureStats>) {
+    pub fn run(
+        config: CaptureConfig,
+        video_sink: Option<VideoStreamSink>,
+        stop: Arc<AtomicBool>,
+        stats: Arc<AtomicCaptureStats>,
+    ) {
         let mut backend = match DxgiCapture::open(config.output_index) {
             Ok(b) => {
                 stats.set_detail(format!(
@@ -365,6 +375,7 @@ mod windows_dxgi {
         // Cap encode rate to target_fps — capture can be 100–180 FPS on active desktop.
         let encode_interval = Duration::from_secs_f64(1.0 / config.target_fps.max(1) as f64);
         let mut last_encode = Instant::now() - encode_interval;
+        let mut last_idr = Instant::now();
 
         while !stop.load(Ordering::Relaxed) {
             let t0 = Instant::now();
@@ -377,6 +388,17 @@ mod windows_dxgi {
                     let should_encode = last_encode.elapsed() >= encode_interval;
                     if should_encode {
                         if let Some(ref mut enc) = encoder {
+                            if let Some(ref sink) = video_sink {
+                                // IDR on Accept + periodic IDR while streaming (lost-packet recovery).
+                                let need_idr = sink.take_force_keyframe()
+                                    || (sink.has_peer()
+                                        && last_idr.elapsed() >= Duration::from_secs(2));
+                                if need_idr {
+                                    enc.force_keyframe();
+                                    last_idr = Instant::now();
+                                }
+                            }
+
                             // Recreate encoder if desired encode size changed
                             let (want_w, want_h) = config.resolve_encode_size(w, h);
                             if want_w != enc.width() || want_h != enc.height() {
@@ -421,6 +443,9 @@ mod windows_dxgi {
                                     encode_window += 1;
                                     bytes_window += frame.data.len() as u64;
                                     last_encode = Instant::now();
+                                    if let Some(ref sink) = video_sink {
+                                        sink.publish(enc.width(), enc.height(), frame);
+                                    }
                                 }
                                 Ok(None) => {
                                     last_encode = Instant::now();
