@@ -119,13 +119,10 @@ mod windows_dxgi {
     use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
     use windows::Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-        D3D11_BIND_FLAG, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-        D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_RESOURCE_MISC_FLAG, D3D11_SDK_VERSION,
-        D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+        D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
+        D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     };
-    use windows::Win32::Graphics::Dxgi::Common::{
-        DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
-    };
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
         DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
@@ -218,9 +215,10 @@ mod windows_dxgi {
                         Quality: 0,
                     },
                     Usage: D3D11_USAGE_STAGING,
-                    BindFlags: D3D11_BIND_FLAG(0),
+                    // Staging textures must not bind to the pipeline.
+                    BindFlags: 0,
                     CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                    MiscFlags: D3D11_RESOURCE_MISC_FLAG(0).0 as u32,
+                    MiscFlags: 0,
                 };
                 let mut tex: Option<ID3D11Texture2D> = None;
                 self.device
@@ -346,7 +344,6 @@ mod windows_dxgi {
         // Cap encode rate to target_fps — capture can be 100–180 FPS on active desktop.
         let encode_interval = Duration::from_secs_f64(1.0 / config.target_fps.max(1) as f64);
         let mut last_encode = Instant::now() - encode_interval;
-        let mut scaled_buf: Vec<u8> = Vec::new();
 
         while !stop.load(Ordering::Relaxed) {
             let t0 = Instant::now();
@@ -378,20 +375,20 @@ mod windows_dxgi {
                             }
 
                             let t1 = Instant::now();
-                            let scaled: &[u8] = if w == enc.width() && h == enc.height() {
-                                &backend.bgra
+                            let scaled = if w == enc.width() && h == enc.height() {
+                                None
                             } else {
-                                scaled_buf = scale_bgra_nn(
+                                Some(scale_bgra_nn(
                                     &backend.bgra,
                                     w,
                                     h,
                                     enc.width(),
                                     enc.height(),
-                                );
-                                &scaled_buf
+                                ))
                             };
+                            let pixels: &[u8] = scaled.as_deref().unwrap_or(&backend.bgra);
 
-                            match enc.encode_bgra(scaled, t0.elapsed().as_micros() as u64) {
+                            match enc.encode_bgra(pixels, t0.elapsed().as_micros() as u64) {
                                 Ok(Some(frame)) => {
                                     let encode_us = t1.elapsed().as_micros() as u64;
                                     stats.record_encode(
