@@ -1,5 +1,6 @@
 //! Session: join accept/reject + UDP input + video stream (Phase 6).
 
+use crate::firewall;
 use crate::settings_store;
 use lanplay_controllers::{
     poll_xinput, probe_vigem, run_client_input_loop, run_host_input_loop, CaptureStatus,
@@ -176,11 +177,14 @@ impl SessionManager {
             }
         };
 
-        // Phase 5–6: capture + encode + video sink (streams after Accept)
+        // Windows Firewall: allow app + ports (UAC once if needed — like "Allow access").
+        let vport = video_port_from_media(media);
+        let fw = firewall::ensure_host_firewall(control, media, vport);
+
+        // Phase 5–6: capture + encode + video sink (streams after Accept / HELLO)
         let video = settings_store::get();
         let capture_cfg = video.to_capture_config();
         let video_sink = VideoStreamSink::new();
-        let vport = video_port_from_media(media);
         let video_sender = video_sink.clone().start_sender(vport).ok();
         let capture_handle =
             run_host_capture_loop(capture_cfg, Some(video_sink.clone())).ok();
@@ -197,7 +201,7 @@ impl SessionManager {
             lanplay_video::ResolutionMode::Fixed => format!("{}x{}", video.width, video.height),
         };
         inner.host.message = format!(
-            "Listening :{control}/input :{media}/video :{vport}. Encode {res_label} @ {}fps / {}kbps. Accept joins. {vigem_detail}",
+            "Listening :{control}/input :{media}/video :{vport}. Encode {res_label} @ {}fps / {}kbps. {fw}. Accept joins. {vigem_detail}",
             video.fps, video.bitrate_kbps
         );
 
@@ -359,6 +363,7 @@ impl SessionManager {
             inner.client.host_ip = Some(ip.clone());
             inner.client.control_port = control_port;
             inner.client.media_port = media_port;
+            let fw = firewall::ensure_client_firewall();
             // Start HELLO punch early so host learns return path as soon as Accept starts encode send.
             let vport = video_port_from_media(media_port);
             if let Some(old) = inner.client_video.take() {
@@ -368,12 +373,12 @@ impl SessionManager {
                 Ok(vh) => {
                     inner.client_video = Some(vh);
                     inner.client.message = format!(
-                        "Requesting to join {ip}… video HELLO → :{vport}. Waiting for Accept."
+                        "Requesting to join {ip}… video HELLO → :{vport}. {fw}. Waiting for Accept."
                     );
                 }
                 Err(e) => {
                     inner.client.message = format!(
-                        "Requesting to join {ip}… (video failed: {e}). Waiting for Accept."
+                        "Requesting to join {ip}… (video failed: {e}). {fw}"
                     );
                 }
             }

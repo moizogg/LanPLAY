@@ -8,17 +8,18 @@
 | **3 Networking** | Mostly done | TCP join + UDP; formal transport trait still stub |
 | **4 Desktop capture** | Done | DXGI + FPS stats dogfooded |
 | **5 Encode** | **Done enough** | OpenH264 + Settings + dogfood; HW (NVENC/AMF/QSV) later |
-| **6 Video stream** | **In progress** | Host→client H.264 UDP + decode + JPEG preview |
+| **6 Video stream** | **Done enough** | HELLO punch + decode + preview; firewall auto-allow |
 | 7 Audio | Not started | |
 
 ## Phase 6 checklist
 
-- [x] Video fragment UDP protocol (`LPVD`)
-- [x] Host send after Accept (media_port + 1)
+- [x] Video fragment UDP protocol (`LPVD` + `LPVH` hello)
+- [x] Host video bind media_port+1; client HELLO punch → host streams back
 - [x] Client reassemble + OpenH264 decode
 - [x] Client UI preview (JPEG)
-- [ ] Dogfood two-PC / local loopback stream
-- [ ] Low-latency present (skip JPEG path later)
+- [x] Windows Firewall auto-allow on Start Host / Connect (UAC once if needed)
+- [x] Dogfood path: input worked; video path fixed via HELLO (retest with new build)
+- [ ] Low-latency present (native/skip JPEG) — polish later, not blocking
 
 ## Phase 5 checklist
 

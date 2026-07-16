@@ -1160,8 +1160,8 @@ export default function App() {
 
         <footer className="mt-auto space-y-1 text-xs text-slate-600">
           <p>
-            Phase 6: host encodes H.264 → UDP (media+1) → client decode +
-            preview. Settings still set host encode quality.
+            Phase 6: video via HELLO punch. Start Host may ask once for
+            Firewall / UAC — allow LANPlay so clients can reach you.
           </p>
           <p>
             Encode plan:{" "}

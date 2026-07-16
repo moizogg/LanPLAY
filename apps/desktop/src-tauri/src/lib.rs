@@ -1,3 +1,4 @@
+mod firewall;
 mod session;
 mod settings_store;
 mod tailscale;
