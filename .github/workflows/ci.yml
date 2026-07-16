@@ -5,15 +5,29 @@ on:
     branches: [main, master]
   pull_request:
   workflow_dispatch:
+    inputs:
+      full_installer:
+        description: "Also build NSIS setup.exe (slower)"
+        type: boolean
+        default: false
+      run_tests:
+        description: "Run cargo test in debug (slow — second full compile)"
+        type: boolean
+        default: false
 
-# Avoid Node 20 deprecation noise from older action runtimes
+# Node 24 for JS actions; fewer deprecation warnings
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "true"
+  # Fewer codegen units = slightly slower first build, better cache reuse? keep default.
+  RUSTFLAGS: "-C debuginfo=0"
 
 jobs:
   desktop-windows:
     name: Build Windows .exe
     runs-on: windows-latest
+    # One runner, one release compile (not debug+release)
 
     steps:
       - uses: actions/checkout@v5
@@ -28,13 +42,26 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Rust cache
+      # Biggest time saver after first green run
+      - name: Rust cache (workspace target/)
         uses: Swatinem/rust-cache@v2
         with:
-          # Workspace root Cargo.toml → binaries land in ./target
           workspaces: ". -> target"
+          shared-key: "lanplay-win-release"
+          cache-all-crates: true
+          # Save even on failure so partial compiles help next run
+          cache-on-failure: true
 
-      - name: Fetch bundled ViGEm redist (DLL + driver setup)
+      # Skip re-cloning/building ViGEm when hash of script unchanged
+      - name: Cache ViGEm redist
+        id: cache-vigem
+        uses: actions/cache@v4
+        with:
+          path: apps/desktop/src-tauri/resources/vigem
+          key: vigem-redist-${{ hashFiles('tools/fetch-vigem-redist.ps1') }}
+
+      - name: Fetch ViGEm redist
+        if: steps.cache-vigem.outputs.cache-hit != 'true'
         shell: pwsh
         run: pwsh -ExecutionPolicy Bypass -File tools/fetch-vigem-redist.ps1
 
@@ -42,45 +69,53 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
 
-      - name: Typecheck + frontend build
-        working-directory: apps/desktop
-        run: npm run build
-
-      - name: Cargo test (workspace)
+      # NOTE: do NOT run a separate `cargo test` by default.
+      # That compiles the whole workspace in *debug*, then tauri builds *release*
+      # again = ~2× the wait. Optional via workflow_dispatch.
+      - name: Cargo test (optional, slow)
+        if: ${{ inputs.run_tests == true }}
         run: cargo test --workspace
 
-      - name: Tauri build (NSIS + exe)
+      # Single release compile. Skip NSIS unless requested (setup packaging is extra time).
+      # Frontend is built via tauri.conf beforeBuildCommand — no separate npm run build.
+      - name: Tauri build (exe only)
+        if: ${{ inputs.full_installer != true }}
+        working-directory: apps/desktop
+        run: npm run tauri build -- --bundles none
+
+      - name: Tauri build (exe + NSIS installer)
+        if: ${{ inputs.full_installer == true }}
         working-directory: apps/desktop
         run: npm run tauri build
 
-      # Monorepo workspace puts cargo/tauri output under REPO/target, not src-tauri/target
       - name: Locate build outputs
         shell: pwsh
         run: |
-          Write-Host "=== Looking for lanplay.exe ==="
+          $found = @()
+          foreach ($p in @(
+            "target\release\lanplay.exe",
+            "apps\desktop\src-tauri\target\release\lanplay.exe"
+          )) {
+            if (Test-Path $p) {
+              Write-Host "FOUND $p"
+              $found += $p
+            }
+          }
           Get-ChildItem -Path . -Recurse -Filter "lanplay.exe" -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty FullName
-          Write-Host "=== Looking for NSIS installers ==="
-          Get-ChildItem -Path . -Recurse -Filter "*setup*.exe" -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match 'bundle|nsis|release' } |
-            Select-Object -ExpandProperty FullName
-          Write-Host "=== target/release (if any) ==="
-          if (Test-Path "target/release") {
-            Get-ChildItem "target/release" -ErrorAction SilentlyContinue | Select-Object Name
-          }
-          if (Test-Path "apps/desktop/src-tauri/target/release") {
-            Get-ChildItem "apps/desktop/src-tauri/target/release" -ErrorAction SilentlyContinue | Select-Object Name
-          }
+            ForEach-Object { Write-Host "FOUND $($_.FullName)"; $found += $_.FullName }
+          if ($found.Count -eq 0) { throw "lanplay.exe not found after build" }
 
       - name: Upload LANPlay Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: lanplay-windows
-          # Workspace target is the real location for this monorepo
           path: |
             target/release/lanplay.exe
             target/release/bundle/nsis/*.exe
             apps/desktop/src-tauri/target/release/lanplay.exe
             apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/resources/vigem/ViGEmClient.dll
+            apps/desktop/src-tauri/resources/vigem/ViGEmBus_Setup.exe
+            apps/desktop/src-tauri/resources/vigem/ViGEmBus_Setup.msi
           if-no-files-found: error
           retention-days: 14

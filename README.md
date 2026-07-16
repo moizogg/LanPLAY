@@ -103,6 +103,22 @@ Use **GitHub Actions `windows-latest`** instead — free online Windows builder.
 
 You can also re-run builds via **Actions → CI → Run workflow**.
 
+### CI is optimized to be faster
+
+| Before (slow) | Now |
+|---------------|-----|
+| `cargo test` (full **debug** compile) + `tauri build` (full **release** compile) = **2× work** | **One** release compile only |
+| NSIS installer every time | **exe only** by default (`--bundles none`) |
+| Rebuild ViGEm every run | **Cached** after first fetch |
+| Rust crates recompiled from scratch | **rust-cache** shared key `lanplay-win-release` |
+
+**First** green run after cache clear can still be ~15–25 min.  
+**Later** runs with a warm cache are often **much** shorter (often ~5–12 min if only a few files changed).
+
+Optional (Actions → Run workflow):
+- `full_installer` — also build NSIS setup  
+- `run_tests` — cargo test (slow; second compile)
+
 ### Local build (optional, needs MSVC)
 
 ```powershell
