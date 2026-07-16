@@ -166,9 +166,8 @@ mod windows_dxgi {
                     .cast()
                     .map_err(|e| format!("IDXGIOutput1 cast: {e}"))?;
 
-                let mut desc = DXGI_OUTPUT_DESC::default();
-                output
-                    .GetDesc(&mut desc)
+                let desc = output
+                    .GetDesc()
                     .map_err(|e| format!("GetDesc: {e}"))?;
 
                 let width =
@@ -266,9 +265,11 @@ mod windows_dxgi {
                 Err(e) if e == "ACCESS_LOST" => {
                     stats.set_detail("Display mode changed — reopening capture…");
                     let idx = backend.output_index;
-                    drop(backend);
-                    thread::sleep(Duration::from_millis(100));
-                    match DxgiCapture::open(idx) {
+                    // Replace backend without leaving it moved across loop iterations
+                    match DxgiCapture::open(idx).or_else(|_| {
+                        thread::sleep(Duration::from_millis(100));
+                        DxgiCapture::open(config.output_index)
+                    }) {
                         Ok(b) => {
                             stats.set_detail(format!(
                                 "Reopened DXGI capture {}x{}",
@@ -279,11 +280,6 @@ mod windows_dxgi {
                         Err(e2) => {
                             stats.set_detail(format!("Reopen failed: {e2}"));
                             thread::sleep(Duration::from_millis(500));
-                            if let Ok(b) = DxgiCapture::open(config.output_index) {
-                                backend = b;
-                            } else {
-                                continue;
-                            }
                         }
                     }
                 }
