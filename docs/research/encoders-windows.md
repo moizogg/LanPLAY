@@ -1,22 +1,33 @@
-# Encoders (Phase 5)
+# Encoders (Windows)
 
-## Current
+## Active
 
 | Backend | Status | Notes |
 |---------|--------|--------|
-| **OpenH264** | **Active** | Software H.264; validates capture→encode pipeline |
-| NVENC | Planned | Replace via `VideoEncoder` trait |
-| AMF | Planned | AMD |
-| QSV | Planned | Intel |
+| **Auto** | **Default** | Prefers hardware MF H.264, else OpenH264 |
+| **Hardware H.264 (MF)** | **Active** | Media Foundation HW MFT → NVENC/AMF/QSV silicon when present |
+| **OpenH264** | **Fallback** | Software; always available |
 
-## Settings (V1 software)
+## Sunshine alignment
 
-- Encode long edge capped at **1280** (nearest-neighbor scale from capture)
-- Target ~**8 Mbps**
-- 60 FPS budget (desktop idle still lower capture FPS)
+Sunshine uses **native NVENC/AMF/QSV SDKs** with GPU-resident textures.  
+LANPlay v1 HW path uses **Windows Media Foundation hardware MFT** + low-latency `ICodecAPI` flags:
 
-## Next
+- `CODECAPI_AVLowLatencyMode`
+- CBR mean bitrate
+- Force keyframe on demand
 
-1. Media Foundation hardware MFT probe (often NVENC/QSV under the hood)
-2. Native NVENC session for lowest latency
-3. Stream Annex-B / length-prefixed NALUs in Phase 6
+Still converts BGRA→NV12 on CPU before MF (full GPU path is next). That alone is a large win vs pure OpenH264 encode.
+
+## Settings (defaults)
+
+- Encoder: **auto**
+- Long edge: **1920**
+- ~**25 Mbps**, **60 FPS** target
+- Bilinear scale when downscaling
+
+## Next (true Sunshine-class)
+
+1. DXGI texture → D3D11 VideoProcessor NV12 → MF/D3D manager (no full Map)
+2. Native `nvEncodeAPI64.dll` session (ULL preset, 1-frame VBV)
+3. Client DXVA decode

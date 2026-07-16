@@ -5,6 +5,9 @@
 mod capture;
 mod decode;
 mod encode;
+#[cfg(windows)]
+mod mf_h264;
+mod nv12;
 mod present;
 mod settings;
 mod stats;

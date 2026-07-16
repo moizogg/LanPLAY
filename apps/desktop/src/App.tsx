@@ -19,13 +19,13 @@ import type {
 
 const DEFAULT_VIDEO: VideoSettings = {
   outputIndex: 0,
-  fps: 30,
-  bitrateKbps: 20000,
+  fps: 60,
+  bitrateKbps: 25000,
   resolutionMode: "auto",
   maxEdge: 1920,
   width: 1920,
   height: 1080,
-  encoder: "openh264",
+  encoder: "auto",
 };
 
 const RECENT_IPS_KEY = "lanplay.recentHostIps";

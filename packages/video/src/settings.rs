@@ -38,14 +38,14 @@ impl Default for VideoSettings {
     fn default() -> Self {
         Self {
             output_index: 0,
-            // Prefer sharp 1080p-class software encode (CPU heavier; use Settings to lower).
-            fps: 30,
-            bitrate_kbps: 20_000,
+            // Prefer 1080p60 @ 25 Mbps; HW MF/NVENC when available via `auto`.
+            fps: 60,
+            bitrate_kbps: 25_000,
             resolution_mode: ResolutionMode::Auto,
             max_edge: 1920,
             width: 1920,
             height: 1080,
-            encoder: "openh264".into(),
+            encoder: "auto".into(),
         }
     }
 }
@@ -61,10 +61,10 @@ impl VideoSettings {
         self.height = self.height.clamp(160, 2160) & !1;
         let enc = self.encoder.to_ascii_lowercase();
         self.encoder = match enc.as_str() {
-            "auto" | "openh264" | "software" => "openh264".into(),
-            // HW ids accepted in config even if not implemented yet
+            "auto" | "hw" | "hardware" | "mf" => "auto".into(),
+            "openh264" | "software" => "openh264".into(),
             "nvenc" | "amf" | "qsv" => enc,
-            _ => "openh264".into(),
+            _ => "auto".into(),
         };
         self
     }
@@ -99,36 +99,44 @@ pub struct EncoderOption {
     pub detail: String,
 }
 
-/// Encoders exposed in Settings (HW stubs until implemented).
+/// Encoders exposed in Settings.
 pub fn list_encoder_options() -> Vec<EncoderOption> {
+    #[cfg(windows)]
+    let hw = crate::mf_h264::hardware_h264_available();
+    #[cfg(not(windows))]
+    let hw = false;
+
     vec![
+        EncoderOption {
+            id: "auto".into(),
+            name: "Auto (hardware preferred)".into(),
+            available: true,
+            hardware: hw,
+            detail: if hw {
+                "Uses Media Foundation HW H.264 (NVENC/AMF/QSV when present), else OpenH264."
+                    .into()
+            } else {
+                "No HW H.264 MFT found — will use OpenH264 software.".into()
+            },
+        },
+        EncoderOption {
+            id: "nvenc".into(),
+            name: "Hardware H.264 (NVENC/MF)".into(),
+            available: hw,
+            hardware: true,
+            detail: if hw {
+                "Hardware MFT encode — low latency path (driver NVENC/AMF/QSV)."
+                    .into()
+            } else {
+                "No hardware H.264 encoder MFT detected on this PC.".into()
+            },
+        },
         EncoderOption {
             id: "openh264".into(),
             name: "OpenH264 (software)".into(),
             available: true,
             hardware: false,
-            detail: "CPU H.264 — works everywhere; slower than NVENC/AMF/QSV.".into(),
-        },
-        EncoderOption {
-            id: "nvenc".into(),
-            name: "NVIDIA NVENC".into(),
-            available: false,
-            hardware: true,
-            detail: "Coming soon — hardware encode on NVIDIA GPUs.".into(),
-        },
-        EncoderOption {
-            id: "amf".into(),
-            name: "AMD AMF".into(),
-            available: false,
-            hardware: true,
-            detail: "Coming soon — hardware encode on AMD GPUs.".into(),
-        },
-        EncoderOption {
-            id: "qsv".into(),
-            name: "Intel Quick Sync".into(),
-            available: false,
-            hardware: true,
-            detail: "Coming soon — hardware encode on Intel iGPU.".into(),
+            detail: "CPU H.264 — works everywhere; higher latency than HW.".into(),
         },
     ]
 }
