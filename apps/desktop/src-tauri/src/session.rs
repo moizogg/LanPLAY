@@ -167,10 +167,12 @@ impl SessionManager {
             }
         };
 
-        // Phase 4: start desktop capture for FPS / timing (no stream yet)
+        // Phase 5: desktop capture + H.264 encode (not streamed yet)
         let capture_handle = run_host_capture_loop(CaptureConfig {
             output_index: 0,
             target_fps: 60,
+            encode_max_edge: 1280,
+            bitrate_bps: 8_000_000,
         })
         .ok();
 
@@ -183,7 +185,7 @@ impl SessionManager {
         inner.host.pending_join = None;
         inner.host.session_active = false;
         inner.host.message = format!(
-            "Listening on control :{control} / input :{media}. Desktop capture running (Phase 4). Accept joins. {vigem_detail}"
+            "Listening on control :{control} / input :{media}. Capture+encode running (Phase 5). Accept joins. {vigem_detail}"
         );
 
         inner.host_join = Some(join_handle);
@@ -431,10 +433,17 @@ impl SessionManager {
             CaptureSnapshot {
                 active: false,
                 frames: 0,
+                encoded_frames: 0,
                 width: 0,
                 height: 0,
+                encode_width: 0,
+                encode_height: 0,
                 fps: 0.0,
+                encode_fps: 0.0,
                 last_capture_ms: 0.0,
+                last_encode_ms: 0.0,
+                bitrate_kbps: 0,
+                encoder: "none".into(),
                 detail: "Capture not running (Start Host to begin).".into(),
             }
         }

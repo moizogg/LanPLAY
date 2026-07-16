@@ -497,33 +497,48 @@ export default function App() {
 
             <div className="rounded-xl border border-white/10 bg-black/30 p-4 text-sm">
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Desktop capture (Phase 4)
+                Capture + encode (Phase 5)
               </p>
               <p className="mt-1 text-slate-300">
                 {desktopCapture?.active ? (
                   <>
                     <span className="font-mono text-cyan-300">
                       {desktopCapture.width}×{desktopCapture.height}
+                    </span>
+                    {" → "}
+                    <span className="font-mono text-cyan-200">
+                      {desktopCapture.encodeWidth}×{desktopCapture.encodeHeight}
                     </span>{" "}
-                    ·{" "}
+                    · cap{" "}
                     <span className="font-mono text-emerald-300">
-                      {desktopCapture.fps.toFixed(1)} FPS
-                    </span>{" "}
-                    · capture{" "}
-                    <span className="font-mono">
-                      {desktopCapture.lastCaptureMs.toFixed(2)} ms
-                    </span>{" "}
-                    · frames {desktopCapture.frames}
+                      {desktopCapture.fps.toFixed(1)}
+                    </span>
+                    {" / enc "}
+                    <span className="font-mono text-emerald-300">
+                      {desktopCapture.encodeFps.toFixed(1)} FPS
+                    </span>
                   </>
                 ) : (
                   <span className="text-slate-500">Not running</span>
                 )}
               </p>
+              {desktopCapture?.active && (
+                <p className="mt-1 font-mono text-xs text-slate-400">
+                  capture {desktopCapture.lastCaptureMs.toFixed(2)} ms · encode{" "}
+                  {desktopCapture.lastEncodeMs.toFixed(2)} ms ·{" "}
+                  {desktopCapture.bitrateKbps} kbps · frames{" "}
+                  {desktopCapture.frames}/{desktopCapture.encodedFrames}
+                </p>
+              )}
               <p className="mt-1 text-xs text-slate-500">
-                {desktopCapture?.detail ?? "Start Host to begin DXGI capture."}
+                Encoder: {desktopCapture?.encoder ?? "—"}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                {desktopCapture?.detail ?? "Start Host to begin capture+encode."}
               </p>
               <p className="mt-1 text-[11px] text-slate-600">
-                Capture only for now — no video stream to client yet (Phase 6).
+                H.264 encoded in memory — not streamed to client yet (Phase 6).
+                Software OpenH264 now; NVENC/AMF/QSV next.
               </p>
             </div>
 

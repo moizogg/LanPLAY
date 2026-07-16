@@ -15,7 +15,7 @@ fn get_app_info() -> serde_json::Value {
         "name": "LANPlay",
         "version": env!("CARGO_PKG_VERSION"),
         "protocolVersion": PROTOCOL_VERSION,
-        "phase": 4,
+        "phase": 5,
     })
 }
 

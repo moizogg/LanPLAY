@@ -77,13 +77,20 @@ export interface CaptureStatus {
   hint: string;
 }
 
-/** Phase 4 host desktop capture stats */
+/** Phase 4–5 host desktop capture + encode stats */
 export interface CaptureSnapshot {
   active: boolean;
   frames: number;
+  encodedFrames: number;
   width: number;
   height: number;
+  encodeWidth: number;
+  encodeHeight: number;
   fps: number;
+  encodeFps: number;
   lastCaptureMs: number;
+  lastEncodeMs: number;
+  bitrateKbps: number;
+  encoder: string;
   detail: string;
 }

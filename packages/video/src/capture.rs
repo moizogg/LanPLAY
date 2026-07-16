@@ -1,20 +1,23 @@
-//! Desktop capture backends (Phase 4).
+//! Desktop capture + encode loop (Phase 4–5).
 //!
-//! Windows: DXGI Desktop Duplication (GPU path, no GDI).
+//! Windows: DXGI Desktop Duplication → staging BGRA → H.264 encode.
 
+use crate::encode::{
+    choose_encode_size, create_encoder, scale_bgra_nn, EncoderSettings, VideoEncoder,
+};
 use crate::stats::AtomicCaptureStats;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// Capture configuration for host.
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
-    /// Prefer this output index (0 = primary).
     pub output_index: u32,
-    /// Target max FPS for the capture loop (sleep budget).
     pub target_fps: u32,
+    /// Max long-edge for software encode (e.g. 1280).
+    pub encode_max_edge: u32,
+    pub bitrate_bps: u32,
 }
 
 impl Default for CaptureConfig {
@@ -22,14 +25,14 @@ impl Default for CaptureConfig {
         Self {
             output_index: 0,
             target_fps: 60,
+            encode_max_edge: 1280,
+            bitrate_bps: 8_000_000,
         }
     }
 }
 
-/// Trait for replaceable capture backends.
 pub trait CaptureBackend: Send {
     fn open(&mut self) -> Result<(), String>;
-    /// Capture one frame. Returns (width, height) when a new frame is available.
     fn capture_frame(&mut self) -> Result<Option<(u32, u32)>, String>;
     fn close(&mut self);
 }
@@ -62,7 +65,7 @@ impl Drop for HostCaptureHandle {
     }
 }
 
-/// Start host desktop capture loop (Phase 4 — measure only, no stream yet).
+/// Start host capture + encode loop (Phase 5 — no network stream yet).
 pub fn run_host_capture_loop(config: CaptureConfig) -> lanplay_shared::Result<HostCaptureHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(AtomicCaptureStats::default());
@@ -70,9 +73,9 @@ pub fn run_host_capture_loop(config: CaptureConfig) -> lanplay_shared::Result<Ho
     let stats_t = Arc::clone(&stats);
 
     let join = thread::Builder::new()
-        .name("lanplay-host-capture".into())
+        .name("lanplay-host-capture-encode".into())
         .spawn(move || {
-            capture_loop(config, stop_t, stats_t);
+            capture_encode_loop(config, stop_t, stats_t);
         })
         .map_err(|e| lanplay_shared::LanPlayError::Message(e.to_string()))?;
 
@@ -83,9 +86,13 @@ pub fn run_host_capture_loop(config: CaptureConfig) -> lanplay_shared::Result<Ho
     })
 }
 
-fn capture_loop(config: CaptureConfig, stop: Arc<AtomicBool>, stats: Arc<AtomicCaptureStats>) {
+fn capture_encode_loop(
+    config: CaptureConfig,
+    stop: Arc<AtomicBool>,
+    stats: Arc<AtomicCaptureStats>,
+) {
     stats.set_active(true);
-    stats.set_detail("Starting desktop capture…");
+    stats.set_detail("Starting capture + encode…");
 
     #[cfg(windows)]
     {
@@ -95,7 +102,7 @@ fn capture_loop(config: CaptureConfig, stop: Arc<AtomicBool>, stats: Arc<AtomicC
     #[cfg(not(windows))]
     {
         let _ = config;
-        stats.set_detail("Desktop capture is only supported on Windows.");
+        stats.set_detail("Capture/encode only supported on Windows.");
         while !stop.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(200));
         }
@@ -112,20 +119,27 @@ mod windows_dxgi {
     use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
     use windows::Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+        D3D11_BIND_FLAG, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_RESOURCE_MISC_FLAG, D3D11_SDK_VERSION,
+        D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::{
+        DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
     };
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
-        DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
+        DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
     };
 
     struct DxgiCapture {
         device: ID3D11Device,
         context: ID3D11DeviceContext,
         duplication: IDXGIOutputDuplication,
+        staging: Option<ID3D11Texture2D>,
         width: u32,
         height: u32,
         output_index: u32,
+        bgra: Vec<u8>,
     }
 
     impl DxgiCapture {
@@ -153,15 +167,12 @@ mod windows_dxgi {
 
                 let factory: IDXGIFactory1 =
                     CreateDXGIFactory1().map_err(|e| format!("CreateDXGIFactory1: {e}"))?;
-
                 let adapter = factory
                     .EnumAdapters1(0)
                     .map_err(|e| format!("EnumAdapters1: {e}"))?;
-
                 let output = adapter
                     .EnumOutputs(output_index)
                     .map_err(|e| format!("EnumOutputs({output_index}): {e}"))?;
-
                 let output1: IDXGIOutput1 = output
                     .cast()
                     .map_err(|e| format!("IDXGIOutput1 cast: {e}"))?;
@@ -169,7 +180,6 @@ mod windows_dxgi {
                 let desc = output
                     .GetDesc()
                     .map_err(|e| format!("GetDesc: {e}"))?;
-
                 let width =
                     (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left).max(1) as u32;
                 let height =
@@ -183,20 +193,50 @@ mod windows_dxgi {
                     device,
                     context,
                     duplication,
+                    staging: None,
                     width,
                     height,
                     output_index,
+                    bgra: vec![0u8; (width * height * 4) as usize],
                 })
             }
         }
 
-        /// Acquire next frame; returns Some((w,h)) if a new desktop frame was produced.
-        fn capture_frame(&mut self) -> Result<Option<(u32, u32)>, String> {
+        fn ensure_staging(&mut self, format: DXGI_FORMAT) -> Result<(), String> {
+            if self.staging.is_some() {
+                return Ok(());
+            }
+            unsafe {
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: self.width,
+                    Height: self.height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: format,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_STAGING,
+                    BindFlags: D3D11_BIND_FLAG(0),
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    MiscFlags: D3D11_RESOURCE_MISC_FLAG(0).0 as u32,
+                };
+                let mut tex: Option<ID3D11Texture2D> = None;
+                self.device
+                    .CreateTexture2D(&desc, None, Some(&mut tex))
+                    .map_err(|e| format!("CreateTexture2D staging: {e}"))?;
+                self.staging = tex;
+            }
+            Ok(())
+        }
+
+        /// Capture one frame into `self.bgra` (BGRA8 tightly packed).
+        fn capture_bgra(&mut self) -> Result<Option<(u32, u32)>, String> {
             unsafe {
                 let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
                 let mut resource: Option<IDXGIResource> = None;
 
-                // ~16ms wait for ~60 FPS budget
                 let hr = self
                     .duplication
                     .AcquireNextFrame(16, &mut frame_info, &mut resource);
@@ -212,16 +252,42 @@ mod windows_dxgi {
                     return Err(format!("AcquireNextFrame: {e}"));
                 }
 
-                // We only need timing + metadata for Phase 4; still map resource briefly
-                // to force GPU work and validate path (no CPU copy of full frame yet).
-                let _tex: Option<ID3D11Texture2D> = resource.and_then(|r| r.cast().ok());
+                let resource = resource.ok_or("null resource")?;
+                let src_tex: ID3D11Texture2D = resource
+                    .cast()
+                    .map_err(|e| format!("texture cast: {e}"))?;
 
-                let _ = self.duplication.ReleaseFrame();
-
-                // Update size if desktop mode changed
-                if frame_info.TotalMetadataBufferSize > 0 {
-                    // keep previous size; reinit on ACCESS_LOST handles mode change
+                // Read texture desc for format
+                let mut src_desc = D3D11_TEXTURE2D_DESC::default();
+                src_tex.GetDesc(&mut src_desc);
+                self.width = src_desc.Width;
+                self.height = src_desc.Height;
+                let needed = (self.width * self.height * 4) as usize;
+                if self.bgra.len() != needed {
+                    self.bgra.resize(needed, 0);
+                    self.staging = None; // recreate for new size
                 }
+
+                self.ensure_staging(src_desc.Format)?;
+                let staging = self.staging.as_ref().unwrap();
+
+                self.context.CopyResource(staging, &src_tex);
+
+                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                self.context
+                    .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                    .map_err(|e| format!("Map staging: {e}"))?;
+
+                let pitch = mapped.RowPitch as usize;
+                let src_ptr = mapped.pData as *const u8;
+                for y in 0..self.height as usize {
+                    let src_row = src_ptr.add(y * pitch);
+                    let dst_row = self.bgra.as_mut_ptr().add(y * self.width as usize * 4);
+                    std::ptr::copy_nonoverlapping(src_row, dst_row, self.width as usize * 4);
+                }
+
+                self.context.Unmap(staging, 0);
+                let _ = self.duplication.ReleaseFrame();
 
                 Ok(Some((self.width, self.height)))
             }
@@ -232,8 +298,8 @@ mod windows_dxgi {
         let mut backend = match DxgiCapture::open(config.output_index) {
             Ok(b) => {
                 stats.set_detail(format!(
-                    "DXGI Desktop Duplication OK — {}x{} (output {})",
-                    b.width, b.height, b.output_index
+                    "DXGI capture OK — {}x{}",
+                    b.width, b.height
                 ));
                 b
             }
@@ -247,34 +313,118 @@ mod windows_dxgi {
             }
         };
 
+        let (ew, eh) = choose_encode_size(backend.width, backend.height, config.encode_max_edge);
+        let mut encoder: Option<Box<dyn VideoEncoder>> = match create_encoder(EncoderSettings {
+            width: ew,
+            height: eh,
+            fps: config.target_fps,
+            bitrate_bps: config.bitrate_bps,
+        }) {
+            Ok(e) => {
+                stats.set_encoder_name(e.name().to_string());
+                stats.set_detail(format!(
+                    "Capture {}x{} → encode {}x{} ({})",
+                    backend.width,
+                    backend.height,
+                    e.width(),
+                    e.height(),
+                    e.name()
+                ));
+                Some(e)
+            }
+            Err(e) => {
+                stats.set_encoder_name("none");
+                stats.set_detail(format!("Encoder init failed: {e} (capture-only)"));
+                None
+            }
+        };
+
         let mut frames_window = 0u32;
+        let mut encode_window = 0u32;
+        let mut bytes_window = 0u64;
         let mut window_start = Instant::now();
-        let frame_budget = Duration::from_micros(1_000_000u64 / config.target_fps.max(1) as u64);
+        // Cap encode rate to target_fps — capture can be 100–180 FPS on active desktop.
+        let encode_interval = Duration::from_secs_f64(1.0 / config.target_fps.max(1) as f64);
+        let mut last_encode = Instant::now() - encode_interval;
+        let mut scaled_buf: Vec<u8> = Vec::new();
 
         while !stop.load(Ordering::Relaxed) {
             let t0 = Instant::now();
-            match backend.capture_frame() {
+            match backend.capture_bgra() {
                 Ok(Some((w, h))) => {
-                    let us = t0.elapsed().as_micros() as u64;
-                    stats.record_frame(w, h, us);
+                    let capture_us = t0.elapsed().as_micros() as u64;
+                    stats.record_frame(w, h, capture_us);
                     frames_window += 1;
+
+                    let should_encode = last_encode.elapsed() >= encode_interval;
+                    if should_encode {
+                        if let Some(ref mut enc) = encoder {
+                            // Recreate encoder if capture size changed a lot
+                            let (want_w, want_h) =
+                                choose_encode_size(w, h, config.encode_max_edge);
+                            if want_w != enc.width() || want_h != enc.height() {
+                                match create_encoder(EncoderSettings {
+                                    width: want_w,
+                                    height: want_h,
+                                    fps: config.target_fps,
+                                    bitrate_bps: config.bitrate_bps,
+                                }) {
+                                    Ok(e) => {
+                                        stats.set_encoder_name(e.name().to_string());
+                                        *enc = e;
+                                    }
+                                    Err(_) => {}
+                                }
+                            }
+
+                            let t1 = Instant::now();
+                            let scaled: &[u8] = if w == enc.width() && h == enc.height() {
+                                &backend.bgra
+                            } else {
+                                scaled_buf = scale_bgra_nn(
+                                    &backend.bgra,
+                                    w,
+                                    h,
+                                    enc.width(),
+                                    enc.height(),
+                                );
+                                &scaled_buf
+                            };
+
+                            match enc.encode_bgra(scaled, t0.elapsed().as_micros() as u64) {
+                                Ok(Some(frame)) => {
+                                    let encode_us = t1.elapsed().as_micros() as u64;
+                                    stats.record_encode(
+                                        enc.width(),
+                                        enc.height(),
+                                        encode_us,
+                                        frame.data.len(),
+                                    );
+                                    encode_window += 1;
+                                    bytes_window += frame.data.len() as u64;
+                                    last_encode = Instant::now();
+                                }
+                                Ok(None) => {
+                                    last_encode = Instant::now();
+                                }
+                                Err(e) => {
+                                    stats.set_detail(format!("Encode error: {e}"));
+                                    last_encode = Instant::now();
+                                }
+                            }
+                        }
+                    }
                 }
-                Ok(None) => {
-                    // timeout — desktop idle; still count as loop tick for pacing
-                }
+                Ok(None) => {}
                 Err(e) if e == "ACCESS_LOST" => {
                     stats.set_detail("Display mode changed — reopening capture…");
                     let idx = backend.output_index;
-                    // Replace backend without leaving it moved across loop iterations
                     match DxgiCapture::open(idx).or_else(|_| {
                         thread::sleep(Duration::from_millis(100));
                         DxgiCapture::open(config.output_index)
                     }) {
                         Ok(b) => {
-                            stats.set_detail(format!(
-                                "Reopened DXGI capture {}x{}",
-                                b.width, b.height
-                            ));
+                            stats.set_detail(format!("Reopened capture {}x{}", b.width, b.height));
                             backend = b;
                         }
                         Err(e2) => {
@@ -290,20 +440,19 @@ mod windows_dxgi {
             }
 
             if window_start.elapsed() >= Duration::from_secs(1) {
-                let fps = frames_window as f32 / window_start.elapsed().as_secs_f32();
-                stats.set_fps(fps);
+                let secs = window_start.elapsed().as_secs_f32().max(0.001);
+                stats.set_fps(frames_window as f32 / secs);
+                stats.set_encode_fps(encode_window as f32 / secs);
+                let kbps = ((bytes_window * 8) as f32 / secs / 1000.0) as u32;
+                stats.set_bitrate_kbps(kbps);
                 frames_window = 0;
+                encode_window = 0;
+                bytes_window = 0;
                 window_start = Instant::now();
-            }
-
-            // Light pacing if we're faster than target (AcquireNextFrame already waits)
-            let elapsed = t0.elapsed();
-            if elapsed < frame_budget / 4 {
-                thread::sleep(Duration::from_millis(1));
             }
         }
 
         stats.set_active(false);
-        stats.set_detail("Capture stopped.");
+        stats.set_detail("Capture/encode stopped.");
     }
 }
