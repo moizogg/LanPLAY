@@ -43,34 +43,39 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
-          shared-key: "lanplay-win-release"
+          shared-key: "lanplay-win-release-static-vigem"
           cache-all-crates: true
           cache-on-failure: true
 
-      - name: Cache ViGEm redist
+      - name: Cache ViGEmBus installer
         id: cache-vigem
         uses: actions/cache@v4
         with:
           path: apps/desktop/src-tauri/resources/vigem
-          key: vigem-redist-v2-${{ hashFiles('tools/fetch-vigem-redist.ps1') }}
+          key: vigem-setup-v3-${{ hashFiles('tools/fetch-vigem-redist.ps1') }}
 
-      - name: Fetch ViGEm redist
+      - name: Fetch ViGEmBus setup
         if: steps.cache-vigem.outputs.cache-hit != 'true'
         shell: pwsh
         run: pwsh -ExecutionPolicy Bypass -File tools/fetch-vigem-redist.ps1
 
-      # Guard against empty/corrupt cache entries
-      - name: Ensure ViGEm files exist
+      - name: Ensure ViGEmBus setup exists
         shell: pwsh
         run: |
-          $dll = "apps/desktop/src-tauri/resources/vigem/ViGEmClient.dll"
           $setup = Get-ChildItem "apps/desktop/src-tauri/resources/vigem" -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match 'ViGEmBus|Setup' -and ($_.Extension -eq '.exe' -or $_.Extension -eq '.msi') }
-          if (-not (Test-Path $dll) -or -not $setup) {
-            Write-Host "ViGEm incomplete — re-fetching..."
+          if (-not $setup) {
+            Write-Host "Setup missing — re-fetching..."
             pwsh -ExecutionPolicy Bypass -File tools/fetch-vigem-redist.ps1
           }
-          if (-not (Test-Path $dll)) { throw "ViGEmClient.dll still missing after fetch" }
+          if (-not (Test-Path "apps/desktop/src-tauri/resources/vigem/ViGEmBus_Setup.exe") -and
+              -not (Test-Path "apps/desktop/src-tauri/resources/vigem/ViGEmBus_Setup.msi")) {
+            throw "ViGEmBus setup still missing"
+          }
+          # Vendored C++ client must exist for static link
+          if (-not (Test-Path "third-party/ViGEmClient/src/ViGEmClient.cpp")) {
+            throw "third-party/ViGEmClient missing — commit vendored sources"
+          }
           Get-ChildItem "apps/desktop/src-tauri/resources/vigem" | Format-Table Name, Length
 
       - name: Install frontend deps
@@ -91,8 +96,6 @@ jobs:
         working-directory: apps/desktop
         run: npm run tauri build -- --ci
 
-      # --no-bundle does NOT copy resources next to the exe. Build a portable folder
-      # so Host can find vigem/ViGEmClient.dll + driver setup without GitHub downloads.
       - name: Assemble portable package
         shell: pwsh
         run: |
@@ -117,7 +120,6 @@ jobs:
           Copy-Item -Force $exe "$out\lanplay.exe"
           Copy-Item -Force -Recurse "apps\desktop\src-tauri\resources\vigem\*" "$out\vigem\" -ErrorAction Stop
 
-          # Stable alias names the app looks for
           $setup = Get-ChildItem "$out\vigem" | Where-Object {
             $_.Name -match 'ViGEmBus' -and ($_.Extension -eq '.exe' -or $_.Extension -eq '.msi')
           } | Select-Object -First 1
@@ -131,22 +133,18 @@ jobs:
           @"
           LANPlay portable package
           ========================
-          1. Keep this whole folder together (do not run lanplay.exe alone from elsewhere).
-          2. Double-click lanplay.exe
-          3. Host: if needed, click "Install gamepad support" (one-time UAC)
-          4. Start Host / Connect as Client with Tailscale IP
+          1. Keep this folder together.
+          2. Run lanplay.exe
+          3. Host: Install gamepad support once if prompted (UAC) — only the kernel driver.
+             ViGEmClient is already inside lanplay.exe (no DLL needed).
+          4. Start Host / Connect with Tailscale IP
 
-          Required layout:
-            lanplay.exe
-            vigem\ViGEmClient.dll
-            vigem\ViGEmBus_Setup.exe  (or .msi)
+          Layout:
+            lanplay.exe          (includes static ViGEmClient)
+            vigem\ViGEmBus_Setup.exe
           "@ | Set-Content -Path "$out\README.txt" -Encoding UTF8
 
-          Write-Host "=== Portable package ==="
           Get-ChildItem -Recurse $out | Select-Object FullName, Length
-          if (-not (Test-Path "$out\vigem\ViGEmClient.dll")) {
-            throw "Portable package missing ViGEmClient.dll"
-          }
 
       - name: Upload LANPlay Windows artifacts
         uses: actions/upload-artifact@v4

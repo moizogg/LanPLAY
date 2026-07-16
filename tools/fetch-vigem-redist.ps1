@@ -1,10 +1,7 @@
-# Download / build official ViGEm redistributables into Tauri resources.
-# Run from repo root:  pwsh -File tools/fetch-vigem-redist.ps1
+# Download official ViGEmBus driver installer into Tauri resources.
+# ViGEmClient is compiled into lanplay.exe (static) — no DLL fetch needed.
 #
-# Users never visit GitHub — CI ships these inside LANPlay.
-#
-# - ViGEmBus setup: official signed installer (kernel driver, one-time UAC)
-# - ViGEmClient.dll: built from nefarius/ViGEmClient (native C API)
+# Run:  pwsh -File tools/fetch-vigem-redist.ps1
 
 $ErrorActionPreference = "Stop"
 
@@ -12,9 +9,14 @@ $Root = Split-Path -Parent $PSScriptRoot
 $OutDir = Join-Path $Root "apps\desktop\src-tauri\resources\vigem"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
+# Remove obsolete DLL from older package layouts
+$oldDll = Join-Path $OutDir "ViGEmClient.dll"
+if (Test-Path $oldDll) {
+    Remove-Item -Force $oldDll
+    Write-Host "Removed obsolete ViGEmClient.dll (now statically linked)."
+}
+
 $VigemBusVersion = "v1.22.0"
-$ViGEmClientRepo = "https://github.com/nefarius/ViGEmClient.git"
-$ViGEmClientRef = "master" # pin a commit SHA later if you want stricter repro
 
 Write-Host "==> Fetching ViGEmBus setup ($VigemBusVersion)…"
 $releaseApi = "https://api.github.com/repos/nefarius/ViGEmBus/releases/tags/$VigemBusVersion"
@@ -51,59 +53,18 @@ if ($setupAsset.name -match '\.msi$') {
     if (Test-Path $aliasMsi) { Remove-Item $aliasMsi -Force }
 }
 
-Write-Host "==> Building native ViGEmClient.dll from source…"
-$work = Join-Path $env:TEMP "lanplay-vigemclient-build"
-if (Test-Path $work) { Remove-Item -Recurse -Force $work }
-New-Item -ItemType Directory -Force -Path $work | Out-Null
-
-$src = Join-Path $work "ViGEmClient"
-Write-Host "    Cloning $ViGEmClientRepo ($ViGEmClientRef)…"
-git clone --depth 1 --branch $ViGEmClientRef $ViGEmClientRepo $src 2>&1 | Out-Host
-
-$build = Join-Path $src "build"
-# SHARED DLL so we can ship next to lanplay.exe
-$cmakeArgs = @(
-    "-S", $src,
-    "-B", $build,
-    "-A", "x64",
-    "-DViGEmClient_DLL=ON"
-)
-Write-Host "    cmake configure…"
-& cmake @cmakeArgs
-if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
-
-Write-Host "    cmake build (Release)…"
-& cmake --build $build --config Release
-if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
-
-$dll = Get-ChildItem -Path $build -Recurse -Filter "ViGEmClient.dll" |
-    Where-Object { $_.FullName -match 'Release|RelWithDebInfo' } |
-    Select-Object -First 1
-if (-not $dll) {
-    $dll = Get-ChildItem -Path $build -Recurse -Filter "ViGEmClient.dll" | Select-Object -First 1
-}
-if (-not $dll) {
-    throw "ViGEmClient.dll not produced by build (is MSVC/CMake available?)"
-}
-
-$dllOut = Join-Path $OutDir "ViGEmClient.dll"
-Copy-Item -Force $dll.FullName $dllOut
-Write-Host "    Saved $dllOut"
-
 $notice = @"
-LANPlay bundles ViGEm redistributables so end users do not download them manually.
+LANPlay packages:
 
-- ViGEmBus driver installer: Nefarius Software Solutions (BSD-3-Clause)
-  https://github.com/nefarius/ViGEmBus
-  Release: $($release.tag_name)
-  Asset: $($setupAsset.name)
+- ViGEmClient: compiled statically into lanplay.exe (Nefarius ViGEmClient, MIT)
+  Source: third-party/ViGEmClient (vendored from https://github.com/nefarius/ViGEmClient)
 
-- ViGEmClient.dll: built from https://github.com/nefarius/ViGEmClient ($ViGEmClientRef)
+- ViGEmBus driver installer: $($release.tag_name) / $($setupAsset.name)
+  https://github.com/nefarius/ViGEmBus (BSD-3-Clause)
 
-Kernel driver still requires a one-time Windows install (UAC).
-LANPlay Host UI runs the bundled installer when needed.
+Kernel driver still requires one-time Windows install (UAC) via Host UI.
 "@
 Set-Content -Path (Join-Path $OutDir "THIRD_PARTY_VIGEM.txt") -Value $notice -Encoding UTF8
 
-Write-Host "==> Done."
+Write-Host "==> Done (driver setup only)."
 Get-ChildItem $OutDir | Format-Table Name, Length

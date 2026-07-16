@@ -342,8 +342,11 @@ export default function App() {
                       "Checking bundled ViGEm support…"}
                 </p>
                 <p className="mt-1 text-slate-500">
-                  DLL: {vigemBundle?.clientDllFound ? "bundled ✓" : "missing"} ·
-                  Setup:{" "}
+                  Client lib:{" "}
+                  {vigemBundle?.clientDllFound
+                    ? "built into app ✓"
+                    : "n/a"}{" "}
+                  · Driver setup:{" "}
                   {vigemBundle?.driverSetupFound ? "bundled ✓" : "missing"}
                 </p>
                 {!vigemBundle?.driverReady &&

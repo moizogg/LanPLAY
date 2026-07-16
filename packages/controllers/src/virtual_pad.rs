@@ -1,7 +1,7 @@
 //! Host-side virtual Xbox 360 pad (ViGEm).
 //!
-//! Loads **bundled** `ViGEmClient.dll` from LANPlay resources (no manual PATH).
-//! Kernel **ViGEmBus** driver is installed once via our bundled setup (UAC).
+//! **ViGEmClient is statically linked** (Sunshine-style) — no ViGEmClient.dll beside the exe.
+//! The **ViGEmBus kernel driver** still must be installed once (bundled setup + UAC).
 
 use crate::paths;
 use lanplay_protocol::InputPacket;
@@ -20,11 +20,11 @@ pub trait VirtualPadBackend: Send {
     fn status(&self) -> VigemStatus;
 }
 
-/// Probe whether ViGEm can be used on this machine (does not plug a pad).
+/// Probe whether ViGEm bus is usable (does not keep a pad plugged).
 pub fn probe_vigem() -> VigemStatus {
     #[cfg(windows)]
     {
-        vigem_ffi::probe_only()
+        vigem_static::probe_only()
     }
     #[cfg(not(windows))]
     {
@@ -47,7 +47,7 @@ pub fn create_virtual_pad() -> Result<Box<dyn VirtualPadBackend>, String> {
     }
 }
 
-/// No-op backend: still receives packets (useful if ViGEm missing).
+/// No-op backend when the bus is missing (still receives packets for metrics).
 pub struct NullVirtualPad {
     detail: String,
     active: bool,
@@ -86,11 +86,9 @@ impl VirtualPadBackend for NullVirtualPad {
 }
 
 #[cfg(windows)]
-mod vigem_ffi {
+mod vigem_static {
     use super::*;
-    use libloading::Library;
     use std::os::raw::{c_uint, c_void};
-    use std::path::Path;
 
     type VigemError = c_uint;
     const VIGEM_ERROR_NONE: VigemError = 0x2000_0000;
@@ -107,28 +105,24 @@ mod vigem_ffi {
         s_thumb_ry: i16,
     }
 
-    type FnAlloc = unsafe extern "C" fn() -> *mut c_void;
-    type FnFree = unsafe extern "C" fn(*mut c_void);
-    type FnConnect = unsafe extern "C" fn(*mut c_void) -> VigemError;
-    type FnDisconnect = unsafe extern "C" fn(*mut c_void);
-    type FnTargetX360Alloc = unsafe extern "C" fn() -> *mut c_void;
-    type FnTargetFree = unsafe extern "C" fn(*mut c_void);
-    type FnTargetAdd = unsafe extern "C" fn(*mut c_void, *mut c_void) -> VigemError;
-    type FnTargetRemove = unsafe extern "C" fn(*mut c_void, *mut c_void) -> VigemError;
-    type FnTargetX360Update =
-        unsafe extern "C" fn(*mut c_void, *mut c_void, XusbReport) -> VigemError;
-
-    struct Api {
-        _lib: Library,
-        free: FnFree,
-        disconnect: FnDisconnect,
-        target_free: FnTargetFree,
-        target_remove: FnTargetRemove,
-        target_x360_update: FnTargetX360Update,
+    // Linked from static lib built by build.rs (ViGEmClient.cpp)
+    unsafe extern "C" {
+        fn vigem_alloc() -> *mut c_void;
+        fn vigem_free(vigem: *mut c_void);
+        fn vigem_connect(vigem: *mut c_void) -> VigemError;
+        fn vigem_disconnect(vigem: *mut c_void);
+        fn vigem_target_x360_alloc() -> *mut c_void;
+        fn vigem_target_free(target: *mut c_void);
+        fn vigem_target_add(vigem: *mut c_void, target: *mut c_void) -> VigemError;
+        fn vigem_target_remove(vigem: *mut c_void, target: *mut c_void) -> VigemError;
+        fn vigem_target_x360_update(
+            vigem: *mut c_void,
+            target: *mut c_void,
+            report: XusbReport,
+        ) -> VigemError;
     }
 
     pub struct VigemX360 {
-        api: Api,
         client: *mut c_void,
         target: *mut c_void,
         plugged: bool,
@@ -136,177 +130,77 @@ mod vigem_ffi {
 
     unsafe impl Send for VigemX360 {}
 
-    fn load_vigem_library() -> Result<(Library, String), String> {
-        let mut errors = Vec::new();
-        for candidate in paths::vigem_client_dll_candidates() {
-            match unsafe { Library::new(&candidate) } {
-                Ok(lib) => {
-                    let label = candidate.display().to_string();
-                    return Ok((lib, label));
-                }
-                Err(e) => {
-                    if candidate.is_file() || candidate.as_os_str() == "ViGEmClient.dll" {
-                        errors.push(format!("{} → {e}", candidate.display()));
-                    }
-                }
-            }
-        }
-        let setup = paths::bundled_driver_setup()
-            .map(|p| format!(" Bundled driver setup is at {} — use Install gamepad support.", p.display()))
-            .unwrap_or_default();
-        Err(format!(
-            "Could not load ViGEmClient.dll (bundled with LANPlay).{setup} Details: {}",
-            errors.join("; ")
-        ))
-    }
-
-    fn resolve_api(lib: &Library) -> Result<(FnAlloc, FnFree, FnConnect, FnDisconnect, FnTargetX360Alloc, FnTargetFree, FnTargetAdd, FnTargetRemove, FnTargetX360Update), String> {
-        unsafe {
-            let alloc: FnAlloc = *lib
-                .get(b"vigem_alloc")
-                .map_err(|e| format!("vigem_alloc: {e}"))?;
-            let free: FnFree = *lib
-                .get(b"vigem_free")
-                .map_err(|e| format!("vigem_free: {e}"))?;
-            let connect: FnConnect = *lib
-                .get(b"vigem_connect")
-                .map_err(|e| format!("vigem_connect: {e}"))?;
-            let disconnect: FnDisconnect = *lib
-                .get(b"vigem_disconnect")
-                .map_err(|e| format!("vigem_disconnect: {e}"))?;
-            let target_x360_alloc: FnTargetX360Alloc = *lib
-                .get(b"vigem_target_x360_alloc")
-                .map_err(|e| format!("vigem_target_x360_alloc: {e}"))?;
-            let target_free: FnTargetFree = *lib
-                .get(b"vigem_target_free")
-                .map_err(|e| format!("vigem_target_free: {e}"))?;
-            let target_add: FnTargetAdd = *lib
-                .get(b"vigem_target_add")
-                .map_err(|e| format!("vigem_target_add: {e}"))?;
-            let target_remove: FnTargetRemove = *lib
-                .get(b"vigem_target_remove")
-                .map_err(|e| format!("vigem_target_remove: {e}"))?;
-            let target_x360_update: FnTargetX360Update = *lib
-                .get(b"vigem_target_x360_update")
-                .map_err(|e| format!("vigem_target_x360_update: {e}"))?;
-            Ok((
-                alloc,
-                free,
-                connect,
-                disconnect,
-                target_x360_alloc,
-                target_free,
-                target_add,
-                target_remove,
-                target_x360_update,
-            ))
-        }
-    }
-
     pub fn probe_only() -> VigemStatus {
-        let (lib, from) = match load_vigem_library() {
-            Ok(v) => v,
-            Err(e) => {
-                return VigemStatus {
-                    available: false,
-                    detail: e,
-                };
-            }
-        };
-
-        let (alloc, free, connect, disconnect, ..) = match resolve_api(&lib) {
-            Ok(v) => v,
-            Err(e) => {
-                return VigemStatus {
-                    available: false,
-                    detail: e,
-                };
-            }
-        };
-
-        let client = unsafe { alloc() };
+        let client = unsafe { vigem_alloc() };
         if client.is_null() {
             return VigemStatus {
                 available: false,
-                detail: "vigem_alloc returned null".into(),
+                detail: "vigem_alloc failed (out of memory?).".into(),
             };
         }
-        let err = unsafe { connect(client) };
+        let err = unsafe { vigem_connect(client) };
         unsafe {
             if err == VIGEM_ERROR_NONE {
-                disconnect(client);
+                vigem_disconnect(client);
             }
-            free(client);
+            vigem_free(client);
         }
-        drop(lib);
 
         if err != VIGEM_ERROR_NONE {
             let hint = if paths::bundled_driver_setup().is_some() {
-                " Click “Install gamepad support” in LANPlay (one-time, built-in installer)."
+                " Click “Install gamepad support” (one-time UAC). Driver is bundled with LANPlay."
             } else {
-                " Driver not installed and no bundled setup found."
+                " Install ViGEmBus driver, or re-download the full portable package."
             };
             return VigemStatus {
                 available: false,
                 detail: format!(
-                    "ViGEm bus not ready (0x{err:08X}) using {from}.{hint}"
+                    "ViGEmBus not ready (0x{err:08X}). Client lib is built into LANPlay.{hint}"
                 ),
             };
         }
+
         VigemStatus {
             available: true,
-            detail: format!("ViGEm ready (loaded from {from})."),
+            detail: "ViGEmBus ready (ViGEmClient statically linked).".into(),
         }
     }
 
     impl VigemX360 {
         pub fn try_open() -> Result<Self, String> {
-            let (lib, _from) = load_vigem_library()?;
-            let (
-                alloc,
-                free,
-                connect,
-                disconnect,
-                target_x360_alloc,
-                target_free,
-                target_add,
-                target_remove,
-                target_x360_update,
-            ) = resolve_api(&lib)?;
-
-            let client = unsafe { alloc() };
+            let client = unsafe { vigem_alloc() };
             if client.is_null() {
                 return Err("vigem_alloc returned null".into());
             }
 
-            let err = unsafe { connect(client) };
+            let err = unsafe { vigem_connect(client) };
             if err != VIGEM_ERROR_NONE {
-                unsafe { free(client) };
+                unsafe { vigem_free(client) };
                 let hint = if paths::bundled_driver_setup().is_some() {
-                    " Use LANPlay → Install gamepad support (bundled, one-time UAC)."
+                    " Use Host → Install gamepad support (bundled installer, one-time UAC)."
                 } else {
                     ""
                 };
                 return Err(format!(
-                    "vigem_connect failed (0x{err:08X}). Virtual gamepad driver not installed.{hint}"
+                    "vigem_connect failed (0x{err:08X}). ViGEmBus driver not installed.{hint}"
                 ));
             }
 
-            let target = unsafe { target_x360_alloc() };
+            let target = unsafe { vigem_target_x360_alloc() };
             if target.is_null() {
                 unsafe {
-                    disconnect(client);
-                    free(client);
+                    vigem_disconnect(client);
+                    vigem_free(client);
                 }
                 return Err("vigem_target_x360_alloc returned null".into());
             }
 
-            let err = unsafe { target_add(client, target) };
+            let err = unsafe { vigem_target_add(client, target) };
             if err != VIGEM_ERROR_NONE {
                 unsafe {
-                    target_free(target);
-                    disconnect(client);
-                    free(client);
+                    vigem_target_free(target);
+                    vigem_disconnect(client);
+                    vigem_free(client);
                 }
                 return Err(format!(
                     "vigem_target_add failed (0x{err:08X}). Could not plug virtual Xbox 360."
@@ -314,14 +208,6 @@ mod vigem_ffi {
             }
 
             Ok(Self {
-                api: Api {
-                    _lib: lib,
-                    free,
-                    disconnect,
-                    target_free,
-                    target_remove,
-                    target_x360_update,
-                },
                 client,
                 target,
                 plugged: true,
@@ -349,7 +235,7 @@ mod vigem_ffi {
                 XusbReport::default()
             };
 
-            let err = unsafe { (self.api.target_x360_update)(self.client, self.target, report) };
+            let err = unsafe { vigem_target_x360_update(self.client, self.target, report) };
             if err != VIGEM_ERROR_NONE {
                 return Err(format!("vigem_target_x360_update failed 0x{err:08X}"));
             }
@@ -359,10 +245,10 @@ mod vigem_ffi {
         fn unplug(&mut self) -> Result<(), String> {
             if self.plugged && !self.client.is_null() && !self.target.is_null() {
                 unsafe {
-                    let _ = (self.api.target_remove)(self.client, self.target);
-                    (self.api.target_free)(self.target);
-                    (self.api.disconnect)(self.client);
-                    (self.api.free)(self.client);
+                    let _ = vigem_target_remove(self.client, self.target);
+                    vigem_target_free(self.target);
+                    vigem_disconnect(self.client);
+                    vigem_free(self.client);
                 }
                 self.target = std::ptr::null_mut();
                 self.client = std::ptr::null_mut();
@@ -379,7 +265,7 @@ mod vigem_ffi {
             VigemStatus {
                 available: self.plugged,
                 detail: if self.plugged {
-                    "ViGEm Xbox 360 virtual pad active.".into()
+                    "ViGEm Xbox 360 virtual pad active (static client).".into()
                 } else {
                     "ViGEm pad inactive.".into()
                 },
@@ -392,12 +278,7 @@ mod vigem_ffi {
             let _ = self.unplug();
         }
     }
-
-    #[allow(dead_code)]
-    fn _path_hint(p: &Path) -> String {
-        p.display().to_string()
-    }
 }
 
 #[cfg(windows)]
-pub use vigem_ffi::VigemX360;
+pub use vigem_static::VigemX360;

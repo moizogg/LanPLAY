@@ -12,8 +12,10 @@ serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-libloading = "0.8"
 windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_UI_Input_XboxController",
 ] }
+
+[target.'cfg(windows)'.build-dependencies]
+cc = "1.2"

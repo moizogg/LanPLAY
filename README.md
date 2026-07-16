@@ -64,8 +64,8 @@ LANPlay **bundles** ViGEm:
 
 | Piece | User experience |
 |-------|-----------------|
-| `ViGEmClient.dll` | Ships inside the app — loaded automatically |
-| ViGEmBus **driver** | Ships inside the app — Host UI **Install gamepad support** (one-time UAC) |
+| **ViGEmClient** | **Compiled into `lanplay.exe`** (static, Sunshine-style) — no separate DLL |
+| ViGEmBus **driver** | Setup ships in `vigem\` — Host UI **Install gamepad support** (one-time UAC) |
 
 Windows does not allow a normal app to load a kernel driver with zero install. We hide that: **one button inside LANPlay**, users never visit GitHub.
 

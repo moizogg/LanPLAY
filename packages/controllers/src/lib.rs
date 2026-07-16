@@ -1,7 +1,7 @@
 //! Controller subsystem (Phase 2).
 //!
 //! - Client: poll XInput → encode `InputPacket` → UDP to host  
-//! - Host: UDP recv → decode → ViGEm virtual Xbox 360  
+//! - Host: UDP recv → decode → **static ViGEm** Xbox 360 (Sunshine-style)
 
 mod host;
 mod packet_stats;
