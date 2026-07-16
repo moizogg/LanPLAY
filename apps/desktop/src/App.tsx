@@ -62,22 +62,17 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [recentIps, setRecentIps] = useState<string[]>(() => loadRecentIps());
 
-  const refresh = useCallback(async () => {
+  /** Session/controller metrics only — safe to poll often (no external CLI). */
+  const refreshLive = useCallback(async () => {
     try {
-      const [info, ts, h, c, st, vb] = await Promise.all([
-        invoke<AppInfo>("get_app_info"),
-        invoke<TailscaleInfo>("get_tailscale_info"),
+      const [h, c, st] = await Promise.all([
         invoke<HostStatus>("get_host_status"),
         invoke<ClientStatus>("get_client_status"),
         invoke<ControllerStats>("get_controller_stats"),
-        invoke<VigemBundleStatus>("get_vigem_bundle_status"),
       ]);
-      setAppInfo(info);
-      setTailscale(ts);
       setHost(h);
       setClient(c);
       setStats(st);
-      setVigemBundle(vb);
       setControlPort(h.controlPort);
       setMediaPort(h.mediaPort);
     } catch (e) {
@@ -85,13 +80,41 @@ export default function App() {
     }
   }, []);
 
+  /** Heavier: Tailscale CLI + ViGEm probe (cached on Rust side; still not every tick). */
+  const refreshSlow = useCallback(async (freshTailscale = false) => {
+    try {
+      const [info, ts, vb] = await Promise.all([
+        invoke<AppInfo>("get_app_info"),
+        invoke<TailscaleInfo>("get_tailscale_info", { fresh: freshTailscale }),
+        invoke<VigemBundleStatus>("get_vigem_bundle_status"),
+      ]);
+      setAppInfo(info);
+      setTailscale(ts);
+      setVigemBundle(vb);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  const refresh = useCallback(async () => {
+    await Promise.all([refreshLive(), refreshSlow(false)]);
+  }, [refreshLive, refreshSlow]);
+
   useEffect(() => {
     void refresh();
-    const id = window.setInterval(() => {
-      void refresh();
+    // Live metrics only — do NOT spawn tailscale every 500ms
+    const liveId = window.setInterval(() => {
+      void refreshLive();
     }, 500);
-    return () => window.clearInterval(id);
-  }, [refresh]);
+    // Occasional slow refresh (Tailscale / ViGEm status)
+    const slowId = window.setInterval(() => {
+      void refreshSlow(false);
+    }, 10_000);
+    return () => {
+      window.clearInterval(liveId);
+      window.clearInterval(slowId);
+    };
+  }, [refresh, refreshLive, refreshSlow]);
 
   async function onStartHost() {
     setBusy(true);
@@ -296,7 +319,10 @@ export default function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => void refresh()}
+                  onClick={() => {
+                    void refreshLive();
+                    void refreshSlow(true);
+                  }}
                   className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-white/10"
                 >
                   Refresh

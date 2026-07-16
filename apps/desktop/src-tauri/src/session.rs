@@ -98,15 +98,16 @@ impl SessionManager {
                 detail: inner.client.message.clone(),
             }
         } else {
-            let vigem = probe_vigem();
+            // Do not call probe_vigem() on every UI poll — it is relatively heavy.
+            // Host start / get_vigem_bundle_status handle real probes.
             ControllerStats {
                 role: "idle".into(),
                 packets: 0,
                 last_seq: 0,
                 input_latency_ms: 0.0,
                 pad_connected: poll_xinput(0).connected,
-                vigem_ok: vigem.available,
-                detail: vigem.detail,
+                vigem_ok: inner.host.vigem_ok,
+                detail: "Idle — start Host or Connect as Client.".into(),
             }
         }
     }

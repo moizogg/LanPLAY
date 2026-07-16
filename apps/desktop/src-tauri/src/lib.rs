@@ -19,8 +19,12 @@ fn get_app_info() -> serde_json::Value {
 }
 
 #[tauri::command]
-fn get_tailscale_info() -> TailscaleInfo {
-    tailscale::detect_tailscale()
+fn get_tailscale_info(fresh: Option<bool>) -> TailscaleInfo {
+    if fresh.unwrap_or(false) {
+        tailscale::detect_tailscale_fresh()
+    } else {
+        tailscale::detect_tailscale()
+    }
 }
 
 #[tauri::command]
