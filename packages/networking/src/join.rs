@@ -134,7 +134,7 @@ pub fn run_host_join_listener(control_port: u16) -> lanplay_shared::Result<HostJ
     let stop = Arc::new(AtomicBool::new(false));
     let pending = Arc::new(Mutex::new(None));
     let allowed_peer = Arc::new(Mutex::new(None));
-    let accepted = Arc::new(Mutex::new(None));
+    let accepted: Arc<Mutex<Option<TcpStream>>> = Arc::new(Mutex::new(None));
 
     let stop_t = Arc::clone(&stop);
     let pending_t = Arc::clone(&pending);
