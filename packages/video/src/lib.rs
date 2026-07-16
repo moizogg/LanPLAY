@@ -5,6 +5,7 @@
 mod capture;
 mod decode;
 mod encode;
+mod present;
 mod settings;
 mod stats;
 mod stream;

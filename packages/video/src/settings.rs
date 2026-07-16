@@ -39,7 +39,7 @@ impl Default for VideoSettings {
         Self {
             output_index: 0,
             fps: 30,
-            bitrate_kbps: 8_000,
+            bitrate_kbps: 12_000,
             resolution_mode: ResolutionMode::Auto,
             max_edge: 1280,
             width: 1280,

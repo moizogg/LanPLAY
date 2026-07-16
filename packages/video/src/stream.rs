@@ -5,12 +5,13 @@
 
 use crate::decode::VideoDecoder;
 use crate::encode::EncodedFrame;
+use crate::present::StreamWindow;
 use lanplay_protocol::{
     encode_video_hello, fragment_access_unit, is_video_hello, FrameReassembler,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -22,6 +23,8 @@ pub struct VideoStreamSink {
     slot: Arc<Mutex<Option<OutgoingFrame>>>,
     frame_id: Arc<AtomicU32>,
     peer: Arc<Mutex<Option<SocketAddr>>>,
+    /// After Accept, only HELLOs from this IP become the video peer (Moonlight session gate).
+    allowed_ip: Arc<Mutex<Option<IpAddr>>>,
     force_keyframe: Arc<AtomicBool>,
     packets_sent: Arc<AtomicU64>,
     hellos_recv: Arc<AtomicU64>,
@@ -40,10 +43,26 @@ impl VideoStreamSink {
             slot: Arc::new(Mutex::new(None)),
             frame_id: Arc::new(AtomicU32::new(1)),
             peer: Arc::new(Mutex::new(None)),
+            allowed_ip: Arc::new(Mutex::new(None)),
             force_keyframe: Arc::new(AtomicBool::new(false)),
             packets_sent: Arc::new(AtomicU64::new(0)),
             hellos_recv: Arc::new(AtomicU64::new(0)),
             detail: Arc::new(Mutex::new("Video sink idle".into())),
+        }
+    }
+
+    /// Gate video to the accepted client IP (set on Accept / cleared on stop).
+    pub fn set_allowed_ip(&self, ip: Option<IpAddr>) {
+        *self.allowed_ip.lock() = ip;
+        match ip {
+            None => {
+                *self.peer.lock() = None;
+                *self.detail.lock() = "Waiting for Accept…".into();
+            }
+            Some(a) => {
+                self.force_keyframe.store(true, Ordering::SeqCst);
+                *self.detail.lock() = format!("Accepted {a} — waiting HELLO");
+            }
         }
     }
 
@@ -109,11 +128,19 @@ impl VideoStreamSink {
                 let mut last_hello_poll = Instant::now();
 
                 while !stop_t.load(Ordering::Relaxed) {
-                    // Drain HELLOs — this is the real client return path.
+                    // Drain HELLOs — only after Accept, and only from that client IP.
                     loop {
                         match sock.recv_from(&mut buf) {
                             Ok((n, from)) => {
                                 if is_video_hello(&buf[..n]) {
+                                    let allowed = *self.allowed_ip.lock();
+                                    let ok = match allowed {
+                                        Some(ip) => from.ip() == ip,
+                                        None => false, // not accepted yet
+                                    };
+                                    if !ok {
+                                        continue;
+                                    }
                                     self.hellos_recv.fetch_add(1, Ordering::Relaxed);
                                     let mut peer = self.peer.lock();
                                     if *peer != Some(from) {
@@ -359,17 +386,24 @@ fn client_video_thread(
         }
     };
 
+    // Moonlight-style dedicated present window (hot path). Opens on first frame.
+    let mut stream_win: Option<StreamWindow> = None;
     let mut reasm = FrameReassembler::new();
     let mut buf = vec![0u8; 2048];
     let mut frames_window = 0u32;
     let mut window_start = Instant::now();
     let mut last_hello = Instant::now() - Duration::from_secs(1);
+    let mut last_thumb = Instant::now() - Duration::from_secs(2);
     let mut got_keyframe = false;
     let hello = encode_video_hello();
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(5))); // low latency poll
+
+    *state.detail.lock() =
+        "Stream window opens on first frame — click it to control host.".into();
 
     while !stop.load(Ordering::Relaxed) {
-        // Keepalive HELLO so host knows where to send (and after Accept).
-        if last_hello.elapsed() >= Duration::from_millis(250) {
+        // Fast HELLO punch
+        if last_hello.elapsed() >= Duration::from_millis(100) {
             match sock.send_to(&hello, host_addr) {
                 Ok(_) => {
                     state.hellos_sent.fetch_add(1, Ordering::Relaxed);
@@ -381,46 +415,84 @@ fn client_video_thread(
             }
         }
 
-        match sock.recv_from(&mut buf) {
-            Ok((n, _src)) => {
-                if is_video_hello(&buf[..n]) {
-                    continue;
-                }
-                state.packets.fetch_add(1, Ordering::Relaxed);
-                if let Some(frame) = reasm.push(&buf[..n]) {
-                    if frame.keyframe {
-                        got_keyframe = true;
-                    }
-                    if !got_keyframe && !frame.keyframe {
+        // Drain all pending packets this tick (reduce backlog latency).
+        loop {
+            match sock.recv_from(&mut buf) {
+                Ok((n, _src)) => {
+                    if is_video_hello(&buf[..n]) {
                         continue;
                     }
-                    match decoder.decode_to_rgba(&frame.data) {
-                        Ok(Some((w, h, rgba))) => {
-                            state.width.store(w, Ordering::Relaxed);
-                            state.height.store(h, Ordering::Relaxed);
-                            state.frames.fetch_add(1, Ordering::Relaxed);
-                            frames_window += 1;
-
-                            if let Some(jpeg) = rgba_to_jpeg_preview(&rgba, w, h, 640) {
-                                *state.jpeg_base64.lock() = jpeg;
-                                *state.detail.lock() =
-                                    format!("Streaming {w}x{h} (preview ≤640)");
-                            }
+                    state.packets.fetch_add(1, Ordering::Relaxed);
+                    if let Some(frame) = reasm.push(&buf[..n]) {
+                        if frame.keyframe {
+                            got_keyframe = true;
                         }
-                        Ok(None) => {}
-                        Err(e) => {
-                            *state.detail.lock() = format!("Decode error: {e}");
-                            got_keyframe = false;
+                        if !got_keyframe && !frame.keyframe {
+                            continue;
+                        }
+                        match decoder.decode_to_rgba(&frame.data) {
+                            Ok(Some((w, h, rgba))) => {
+                                state.width.store(w, Ordering::Relaxed);
+                                state.height.store(h, Ordering::Relaxed);
+                                state.frames.fetch_add(1, Ordering::Relaxed);
+                                frames_window += 1;
+
+                                // Native present ASAP (full res) — this is the real view.
+                                if stream_win.is_none() {
+                                    match StreamWindow::open(w, h) {
+                                        Ok(win) => {
+                                            stream_win = Some(win);
+                                            *state.detail.lock() = format!(
+                                                "Stream {w}x{h} — click stream window to control"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            *state.detail.lock() = format!("Window open: {e}");
+                                        }
+                                    }
+                                }
+                                if let Some(ref mut win) = stream_win {
+                                    if !win.is_open() {
+                                        *state.detail.lock() =
+                                            "Stream window closed — reconnect to reopen.".into();
+                                        stream_win = None;
+                                    } else if let Err(e) = win.present_rgba(&rgba, w, h) {
+                                        *state.detail.lock() = format!("Present: {e}");
+                                    }
+                                }
+
+                                // Rare tiny JPEG for Tauri status panel only (not control path).
+                                if last_thumb.elapsed() >= Duration::from_millis(500) {
+                                    if let Some(jpeg) = rgba_to_jpeg_preview(&rgba, w, h, 480) {
+                                        *state.jpeg_base64.lock() = jpeg;
+                                    }
+                                    last_thumb = Instant::now();
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(_e) => {
+                                // Corrupt/incomplete AU — wait for next IDR (don't spam UI).
+                                got_keyframe = false;
+                            }
                         }
                     }
                 }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(e) => {
+                    *state.detail.lock() = format!("recv error: {e}");
+                    break;
+                }
             }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(e) => {
-                *state.detail.lock() = format!("recv error: {e}");
-                thread::sleep(Duration::from_millis(50));
+        }
+
+        if let Some(ref mut win) = stream_win {
+            if win.is_open() {
+                win.pump();
             }
         }
 
@@ -475,7 +547,7 @@ fn rgba_to_jpeg_preview(rgba: &[u8], w: u32, h: u32, max_edge: u32) -> Option<St
 
     let mut cursor = Cursor::new(Vec::new());
     let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 55);
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 72);
     encoder
         .encode(rgb.as_raw(), dw, dh, image::ExtendedColorType::Rgb8)
         .ok()?;

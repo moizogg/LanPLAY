@@ -230,6 +230,7 @@ impl SessionManager {
         }
         if let Some(sink) = inner.host_video_sink.take() {
             sink.set_peer(None);
+            sink.set_allowed_ip(None);
         }
         inner.host.state = SessionState::Idle;
         inner.host.packets_received = 0;
@@ -268,20 +269,21 @@ impl SessionManager {
         if accept {
             inner.host.session_active = true;
             inner.host.state = SessionState::Streaming;
-            // Video path: client punches HELLO to host:video_port; host learns return addr.
+            // Gate video to accepted client; client HELLO provides return UDP port.
             let vport = video_port_from_media(inner.host.media_port);
             if let Some(ref sink) = inner.host_video_sink {
-                sink.set_peer(None); // clear until HELLO
+                sink.set_peer(None);
+                sink.set_allowed_ip(peer_ip);
             }
-            let _ = peer_ip;
             inner.host.message = format!(
-                "{msg}. Waiting for client video HELLO on :{vport}, then stream. Pad/KBM live."
+                "{msg}. Video :{vport} (HELLO from accepted client). Pad/KBM live."
             );
         } else {
             inner.host.session_active = false;
             inner.host.state = SessionState::Listening;
             if let Some(ref sink) = inner.host_video_sink {
                 sink.set_peer(None);
+                sink.set_allowed_ip(None);
             }
             inner.host.message = format!("{msg}. Still listening for another join.");
         }
@@ -408,6 +410,9 @@ impl SessionManager {
                         let vport = video_port_from_media(media_port);
                         match run_client_input_loop(ip_bg.clone(), media_port, 250, alive) {
                             Ok(handle) => {
+                                // Moonlight-style: capture ON when session goes live.
+                                // Click the Stream window so it is focused for relative mouse.
+                                let _ = handle.set_capture(true);
                                 inner.client_control = Some(ctrl);
                                 inner.client_input = Some(handle);
                                 inner.client.state = SessionState::Streaming;
@@ -416,11 +421,11 @@ impl SessionManager {
                                 let video_ok = inner.client_video.is_some();
                                 inner.client.message = if video_ok {
                                     format!(
-                                        "Host accepted! Video :{vport} + input → {ip_bg}."
+                                        "Live → {ip_bg}. Stream window = control surface (like Moonlight). Ctrl+Shift+Alt+Z release."
                                     )
                                 } else {
                                     format!(
-                                        "Host accepted (input only). Video port :{vport} failed earlier."
+                                        "Host accepted (input only). Video :{vport} failed earlier."
                                     )
                                 };
                             }

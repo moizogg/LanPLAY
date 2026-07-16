@@ -1051,7 +1051,7 @@ export default function App() {
               <div className="overflow-hidden rounded-xl border border-white/10 bg-black/50">
                 <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Remote video (Phase 6)
+                    Remote video (thumb) · main view = Stream window
                   </p>
                   <p className="font-mono text-[11px] text-slate-400">
                     {clientVideo?.active
@@ -1069,7 +1069,7 @@ export default function App() {
                   ) : (
                     <p className="px-4 py-12 text-center text-sm text-slate-500">
                       {clientVideo?.detail ??
-                        "Waiting for host video after Accept…"}
+                        "After Accept a Stream window opens — click it to control (Moonlight-style)."}
                     </p>
                   )}
                 </div>

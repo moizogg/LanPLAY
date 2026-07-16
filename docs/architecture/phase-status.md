@@ -8,7 +8,7 @@
 | **3 Networking** | Mostly done | TCP join + UDP; formal transport trait still stub |
 | **4 Desktop capture** | Done | DXGI + FPS stats dogfooded |
 | **5 Encode** | **Done enough** | OpenH264 + Settings + dogfood; HW (NVENC/AMF/QSV) later |
-| **6 Video stream** | **Done enough** | HELLO punch + decode + preview; firewall auto-allow |
+| **6 Video stream** | **Done enough** | Stream window + cursor + HELLO; JPEG thumb only |
 | 7 Audio | Not started | |
 
 ## Phase 6 checklist

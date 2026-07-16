@@ -310,7 +310,131 @@ mod windows_dxgi {
                 self.context.Unmap(staging, 0);
                 let _ = self.duplication.ReleaseFrame();
 
+                // DXGI desktop image has no cursor — composite OS cursor (Moonlight/Sunshine-style).
+                draw_cursor_bgra(&mut self.bgra, self.width, self.height);
+
                 Ok(Some((self.width, self.height)))
+            }
+        }
+    }
+
+    /// Draw the system cursor into a tight BGRA buffer (primary display / output 0).
+    fn draw_cursor_bgra(bgra: &mut [u8], width: u32, height: u32) {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Gdi::{
+            CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
+            PatBlt, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLACKNESS,
+            DIB_RGB_COLORS, HGDIOBJ,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, ICONINFO,
+        };
+
+        unsafe {
+            let mut ci = CURSORINFO {
+                cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetCursorInfo(&mut ci).is_err() {
+                return;
+            }
+            if (ci.flags.0 & CURSOR_SHOWING.0) == 0 || ci.hCursor.is_invalid() {
+                return;
+            }
+
+            let mut ii = ICONINFO::default();
+            if GetIconInfo(ci.hCursor, &mut ii).is_err() {
+                return;
+            }
+            let hot_x = ii.xHotspot as i32;
+            let hot_y = ii.yHotspot as i32;
+            if !ii.hbmMask.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(ii.hbmMask.0));
+            }
+            if !ii.hbmColor.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(ii.hbmColor.0));
+            }
+
+            let x = ci.ptScreenPos.x - hot_x;
+            let y = ci.ptScreenPos.y - hot_y;
+            let cw = 32i32;
+            let ch = 32i32;
+            if x + cw < 0 || y + ch < 0 || x >= width as i32 || y >= height as i32 {
+                return;
+            }
+
+            let hdc_screen = GetDC(HWND::default());
+            if hdc_screen.is_invalid() {
+                return;
+            }
+            let hdc_mem = CreateCompatibleDC(hdc_screen);
+            let hbmp = CreateCompatibleBitmap(hdc_screen, cw, ch);
+            let old = SelectObject(hdc_mem, HGDIOBJ(hbmp.0));
+
+            let _ = PatBlt(hdc_mem, 0, 0, cw, ch, BLACKNESS);
+            let _ = DrawIconEx(hdc_mem, 0, 0, ci.hCursor, cw, ch, 0, None, DI_NORMAL);
+
+            let mut bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: cw,
+                    biHeight: -ch,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0 as u32,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut cursor_bgra = vec![0u8; (cw * ch * 4) as usize];
+            let got = GetDIBits(
+                hdc_mem,
+                hbmp,
+                0,
+                ch as u32,
+                Some(cursor_bgra.as_mut_ptr().cast()),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+
+            let _ = SelectObject(hdc_mem, old);
+            let _ = DeleteObject(HGDIOBJ(hbmp.0));
+            let _ = DeleteDC(hdc_mem);
+            ReleaseDC(HWND::default(), hdc_screen);
+
+            if got == 0 {
+                return;
+            }
+
+            for row in 0..ch {
+                let dy = y + row;
+                if dy < 0 || dy >= height as i32 {
+                    continue;
+                }
+                for col in 0..cw {
+                    let dx = x + col;
+                    if dx < 0 || dx >= width as i32 {
+                        continue;
+                    }
+                    let si = ((row * cw + col) * 4) as usize;
+                    let b = cursor_bgra[si];
+                    let g = cursor_bgra[si + 1];
+                    let r = cursor_bgra[si + 2];
+                    let a = cursor_bgra[si + 3];
+                    if r == 0 && g == 0 && b == 0 && a == 0 {
+                        continue;
+                    }
+                    let di = ((dy as u32 * width + dx as u32) * 4) as usize;
+                    if di + 3 >= bgra.len() {
+                        continue;
+                    }
+                    if (r | g | b) != 0 || a > 0 {
+                        bgra[di] = b;
+                        bgra[di + 1] = g;
+                        bgra[di + 2] = r;
+                        bgra[di + 3] = 255;
+                    }
+                }
             }
         }
     }
@@ -376,6 +500,7 @@ mod windows_dxgi {
         let encode_interval = Duration::from_secs_f64(1.0 / config.target_fps.max(1) as f64);
         let mut last_encode = Instant::now() - encode_interval;
         let mut last_idr = Instant::now();
+        // Prefer low latency when a client is connected: IDR more often for recovery.
 
         while !stop.load(Ordering::Relaxed) {
             let t0 = Instant::now();
@@ -392,7 +517,7 @@ mod windows_dxgi {
                                 // IDR on Accept + periodic IDR while streaming (lost-packet recovery).
                                 let need_idr = sink.take_force_keyframe()
                                     || (sink.has_peer()
-                                        && last_idr.elapsed() >= Duration::from_secs(2));
+                                        && last_idr.elapsed() >= Duration::from_secs(1));
                                 if need_idr {
                                     enc.force_keyframe();
                                     last_idr = Instant::now();
