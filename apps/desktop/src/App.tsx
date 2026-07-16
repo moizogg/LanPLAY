@@ -247,9 +247,9 @@ export default function App() {
               LANPlay
             </h1>
             <p className="mt-1 max-w-md text-sm text-slate-400">
-              Host Accepts join requests. Client keyboard/mouse work after
-              Accept. Virtual pad on Host only when Client has a stable
-              controller.
+              After Accept: keyboard/mouse only while LANPlay is focused on
+              the client. Controller is sent to host (local pad held
+              best-effort).
             </p>
           </div>
           <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-right text-xs text-slate-400">

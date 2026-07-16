@@ -1,16 +1,22 @@
 //! Windows client sampling + host injection via SendInput.
+//!
+//! Client only captures keyboard/mouse when a LANPlay window is foreground
+//! (so you can use other apps on the client without controlling the host).
 
 use lanplay_protocol::{
     KbmPacket, KBM_FLAG_LBUTTON, KBM_FLAG_MBUTTON, KBM_FLAG_RBUTTON,
 };
+use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyboardState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
     KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
     MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
     MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
 };
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-use windows::Win32::Foundation::POINT;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowThreadProcessId,
+};
 
 /// Tracks client cursor + previous key snapshot for deltas.
 #[derive(Default)]
@@ -18,6 +24,8 @@ pub struct ClientKbmState {
     last_x: i32,
     last_y: i32,
     has_pos: bool,
+    /// Last focus state — reset mouse baseline when regaining focus.
+    was_focused: bool,
 }
 
 /// Tracks which keys host thinks are down so we can emit KEYUP.
@@ -28,8 +36,48 @@ pub struct HostKbmState {
     mouse_buttons: u8,
 }
 
+/// True when the foreground window belongs to this process (LANPlay app).
+pub fn is_lanplay_focused() -> bool {
+    unsafe {
+        let hwnd: HWND = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        pid == GetCurrentProcessId()
+    }
+}
+
 /// Sample mouse delta + held keys on the client PC.
+/// When LANPlay is **not** focused, returns an empty packet (and resets mouse baseline).
 pub fn sample_kbm_on_client(state: &mut ClientKbmState, seq: u32) -> KbmPacket {
+    let focused = is_lanplay_focused();
+
+    if !focused {
+        // Avoid a huge mouse jump when user returns to the app
+        state.has_pos = false;
+        state.was_focused = false;
+        let mut packet = KbmPacket {
+            flags: 0,
+            seq,
+            client_ts_us: 0,
+            mouse_dx: 0,
+            mouse_dy: 0,
+            wheel: 0,
+            keys: [0; 8],
+            key_count: 0,
+        };
+        packet.stamp_now();
+        return packet;
+    }
+
+    if !state.was_focused {
+        // Just focused — re-baseline cursor, don't send a huge delta
+        state.has_pos = false;
+        state.was_focused = true;
+    }
+
     let mut flags = 0u8;
     if async_down(VK_LBUTTON.0 as i32) {
         flags |= KBM_FLAG_LBUTTON;
@@ -45,7 +93,6 @@ pub fn sample_kbm_on_client(state: &mut ClientKbmState, seq: u32) -> KbmPacket {
 
     let mut keys = [0u8; 8];
     let mut key_count = 0u8;
-    // Scan common VK range; pack up to 8 currently held keys (skip mouse buttons).
     for vk in 0x08u8..=0xFEu8 {
         if vk == VK_LBUTTON.0 as u8 || vk == VK_RBUTTON.0 as u8 || vk == VK_MBUTTON.0 as u8 {
             continue;
@@ -74,7 +121,6 @@ pub fn sample_kbm_on_client(state: &mut ClientKbmState, seq: u32) -> KbmPacket {
 
 /// Apply remote KBM on the host desktop.
 pub fn apply_kbm_on_host(state: &mut HostKbmState, packet: &KbmPacket) {
-    // Relative mouse move
     if packet.mouse_dx != 0 || packet.mouse_dy != 0 {
         send_mouse_move(packet.mouse_dx as i32, packet.mouse_dy as i32);
     }
@@ -82,7 +128,6 @@ pub fn apply_kbm_on_host(state: &mut HostKbmState, packet: &KbmPacket) {
         send_mouse_wheel(packet.wheel as i32);
     }
 
-    // Mouse buttons edge detection
     let prev = state.mouse_buttons;
     let now = packet.flags;
     edge_mouse(prev, now, KBM_FLAG_LBUTTON, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
@@ -96,7 +141,6 @@ pub fn apply_kbm_on_host(state: &mut HostKbmState, packet: &KbmPacket) {
     );
     state.mouse_buttons = now;
 
-    // Keyboard: release keys no longer held, press new ones
     let new_keys = &packet.keys[..packet.key_count.min(8) as usize];
     let old_keys = &state.keys_down[..state.key_count.min(8) as usize];
 
@@ -137,7 +181,13 @@ fn mouse_delta(state: &mut ClientKbmState) -> (i16, i16) {
     (dx, dy)
 }
 
-fn edge_mouse(prev: u8, now: u8, flag: u8, down: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS, up: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS) {
+fn edge_mouse(
+    prev: u8,
+    now: u8,
+    flag: u8,
+    down: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS,
+    up: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS,
+) {
     let was = prev & flag != 0;
     let is = now & flag != 0;
     if !was && is {
@@ -162,7 +212,10 @@ fn send_mouse_move(dx: i32, dy: i32) {
         },
     };
     unsafe {
-        let _ = SendInput(std::slice::from_ref(&input), std::mem::size_of::<INPUT>() as i32);
+        let _ = SendInput(
+            std::slice::from_ref(&input),
+            std::mem::size_of::<INPUT>() as i32,
+        );
     }
 }
 
@@ -181,7 +234,10 @@ fn send_mouse_wheel(delta: i32) {
         },
     };
     unsafe {
-        let _ = SendInput(std::slice::from_ref(&input), std::mem::size_of::<INPUT>() as i32);
+        let _ = SendInput(
+            std::slice::from_ref(&input),
+            std::mem::size_of::<INPUT>() as i32,
+        );
     }
 }
 
@@ -200,7 +256,10 @@ fn send_mouse_button(flags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_E
         },
     };
     unsafe {
-        let _ = SendInput(std::slice::from_ref(&input), std::mem::size_of::<INPUT>() as i32);
+        let _ = SendInput(
+            std::slice::from_ref(&input),
+            std::mem::size_of::<INPUT>() as i32,
+        );
     }
 }
 
@@ -223,11 +282,13 @@ fn send_key(vk: u8, down: bool) {
         },
     };
     unsafe {
-        let _ = SendInput(std::slice::from_ref(&input), std::mem::size_of::<INPUT>() as i32);
+        let _ = SendInput(
+            std::slice::from_ref(&input),
+            std::mem::size_of::<INPUT>() as i32,
+        );
     }
 }
 
-// silence unused if keyboard state used later
 #[allow(dead_code)]
 fn _keyboard_state_snapshot() -> [u8; 256] {
     let mut state = [0u8; 256];

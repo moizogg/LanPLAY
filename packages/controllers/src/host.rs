@@ -154,10 +154,11 @@ fn host_loop(
     let mut last_log = Instant::now();
 
     /// Need this many consecutive "connected" packets before creating ViGEm target.
-    const CREATE_STREAK: u32 = 8; // ~8 * 4ms ≈ 32ms at 250Hz
-    /// Need this many consecutive "disconnected" OR silence before removing.
-    const DESTROY_STREAK: u32 = 40; // ~160ms of "no pad"
-    const DESTROY_SILENCE: Duration = Duration::from_millis(400);
+    const CREATE_STREAK: u32 = 10; // ~40ms at 250Hz
+    /// Need this many consecutive "disconnected" before removing (ignore short XInput blips).
+    const DESTROY_STREAK: u32 = 120; // ~500ms of "no pad"
+    /// Also remove if no *connected* packet at all for this long (UDP loss / unplug).
+    const DESTROY_SILENCE: Duration = Duration::from_millis(2500);
 
     while !stop.load(Ordering::Relaxed) {
         // Silence timeout: client stopped reporting a connected pad

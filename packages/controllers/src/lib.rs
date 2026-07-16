@@ -1,7 +1,8 @@
 //! Controller + input subsystem.
 //!
-//! Host creates virtual Xbox 360 only after client controller reports stay stable.
-//! Client stops sending when control TCP dies (host Stop Host).
+//! - KBM only while LANPlay is focused on the client
+//! - Virtual pad on host is debounced (no random disconnects)
+//! - Best-effort exclusive pad hold so client games use the pad less
 
 mod host;
 mod packet_stats;
@@ -20,7 +21,7 @@ pub use virtual_pad::{
     create_virtual_pad, probe_vigem, NullVirtualPad, VigemStatus, VirtualPadBackend,
 };
 
-use lanplay_input::{sample_kbm_on_client, ClientKbmState};
+use lanplay_input::{sample_kbm_on_client, ClientKbmState, ExclusivePadGuard};
 use lanplay_protocol::{InputPacket, FLAG_CONNECTED};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,7 +34,6 @@ pub struct ClientInputHandle {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
     stats: Arc<AtomicInputStats>,
-    /// Shared with control-session watch — cleared when host drops TCP.
     session_alive: Arc<AtomicBool>,
 }
 
@@ -118,68 +118,63 @@ fn client_loop(
     };
     let _ = sock.set_write_timeout(Some(Duration::from_millis(50)));
 
+    // Hold physical pads exclusive so client games see them less (best-effort).
+    let exclusive = ExclusivePadGuard::acquire();
+    let exclusive_n = exclusive.count();
+
     let period = Duration::from_micros((1_000_000u64 / poll_hz.max(30) as u64).max(1));
     let mut seq: u32 = 0;
     let mut kbm_state = ClientKbmState::default();
-    // Hysteresis for XInput flapping
     let mut pad_seen_streak: u32 = 0;
     let mut pad_lost_streak: u32 = 0;
     let mut pad_active = false;
+    let mut last_good = PhysicalPadState::default();
 
     stats.set_detail(format!(
-        "Sending KBM + controller to {addr}. Stops if host ends the session."
+        "Live → {addr}. KBM only when LANPlay focused. Exclusive HID holds: {exclusive_n}. Pad muted locally best-effort."
     ));
 
     while !stop.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
         seq = seq.wrapping_add(1);
 
+        // KBM: empty when unfocused → host gets key-up / no mouse (handled in sample)
         let kbm = sample_kbm_on_client(&mut kbm_state, seq);
         let _ = sock.send_to(&kbm.encode(), addr);
 
-        let sample = poll_xinput(0);
+        // Prefer first connected physical XInput slot (0..3)
+        let sample = poll_first_connected_pad();
         if sample.connected {
             pad_seen_streak = pad_seen_streak.saturating_add(1);
             pad_lost_streak = 0;
-            if !pad_active && pad_seen_streak >= 5 {
+            last_good = sample;
+            if !pad_active && pad_seen_streak >= 8 {
                 pad_active = true;
             }
         } else {
             pad_lost_streak = pad_lost_streak.saturating_add(1);
             pad_seen_streak = 0;
-            if pad_active && pad_lost_streak >= 15 {
+            // ~1s of continuous disconnect at 250Hz before we drop pad_active
+            if pad_active && pad_lost_streak >= 250 {
                 pad_active = false;
+                last_good = PhysicalPadState::default();
             }
         }
 
-        // Only claim connected when hysteresis says pad is stable
-        let mut packet = if pad_active && sample.connected {
+        // While pad_active, keep sending CONNECTED even on brief XInput glitches
+        // (use last_good state) so host does not randomly unplug.
+        let mut packet = if pad_active {
             InputPacket {
                 controller_id: 0,
                 flags: FLAG_CONNECTED,
                 seq,
                 client_ts_us: 0,
-                buttons: sample.buttons,
-                left_trigger: sample.left_trigger,
-                right_trigger: sample.right_trigger,
-                thumb_lx: sample.thumb_lx,
-                thumb_ly: sample.thumb_ly,
-                thumb_rx: sample.thumb_rx,
-                thumb_ry: sample.thumb_ry,
-            }
-        } else if pad_active {
-            // Brief XInput glitch — still send last-known connected empty-ish? better send connected with zeros
-            InputPacket {
-                controller_id: 0,
-                flags: FLAG_CONNECTED,
-                seq,
-                client_ts_us: 0,
-                buttons: 0,
-                left_trigger: 0,
-                right_trigger: 0,
-                thumb_lx: 0,
-                thumb_ly: 0,
-                thumb_rx: 0,
-                thumb_ry: 0,
+                buttons: last_good.buttons,
+                left_trigger: last_good.left_trigger,
+                right_trigger: last_good.right_trigger,
+                thumb_lx: last_good.thumb_lx,
+                thumb_ly: last_good.thumb_ly,
+                thumb_rx: last_good.thumb_rx,
+                thumb_ry: last_good.thumb_ry,
             }
         } else {
             InputPacket::now_disconnected(0, seq)
@@ -189,7 +184,6 @@ fn client_loop(
         match sock.send_to(&packet.encode(), addr) {
             Ok(_) => stats.record_send(seq, pad_active),
             Err(e) => {
-                // Host gone / network error — end session so UI resets
                 stats.set_detail(format!("send error (host may have stopped): {e}"));
                 session_alive.store(false, Ordering::SeqCst);
                 break;
@@ -199,6 +193,18 @@ fn client_loop(
         thread::sleep(period);
     }
 
-    stats.set_detail("Client input stopped (session ended).");
+    // Drop exclusive holds → pad available again on client
+    drop(exclusive);
+    stats.set_detail("Client input stopped (session ended). Pad released locally.");
     session_alive.store(false, Ordering::SeqCst);
+}
+
+fn poll_first_connected_pad() -> PhysicalPadState {
+    for user in 0..4 {
+        let s = poll_xinput(user);
+        if s.connected {
+            return s;
+        }
+    }
+    PhysicalPadState::default()
 }
