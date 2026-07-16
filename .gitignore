@@ -35,3 +35,8 @@ apps/desktop/src-tauri/WixTools/
 # Misc
 *.pdb
 .cache/
+
+# Local reference code (do not commit)
+Sunshine-master/
+Sunshine/
+**/Sunshine-master/
