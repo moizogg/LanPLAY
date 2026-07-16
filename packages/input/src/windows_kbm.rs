@@ -31,13 +31,13 @@ pub struct HostKbmState {
 /// Sample mouse delta + held keys on the client PC.
 pub fn sample_kbm_on_client(state: &mut ClientKbmState, seq: u32) -> KbmPacket {
     let mut flags = 0u8;
-    if async_down(VK_LBUTTON.0) {
+    if async_down(VK_LBUTTON.0 as i32) {
         flags |= KBM_FLAG_LBUTTON;
     }
-    if async_down(VK_RBUTTON.0) {
+    if async_down(VK_RBUTTON.0 as i32) {
         flags |= KBM_FLAG_RBUTTON;
     }
-    if async_down(VK_MBUTTON.0) {
+    if async_down(VK_MBUTTON.0 as i32) {
         flags |= KBM_FLAG_MBUTTON;
     }
 
@@ -50,7 +50,7 @@ pub fn sample_kbm_on_client(state: &mut ClientKbmState, seq: u32) -> KbmPacket {
         if vk == VK_LBUTTON.0 as u8 || vk == VK_RBUTTON.0 as u8 || vk == VK_MBUTTON.0 as u8 {
             continue;
         }
-        if async_down(vk as i32) {
+        if async_down(i32::from(vk)) {
             if (key_count as usize) < 8 {
                 keys[key_count as usize] = vk;
                 key_count += 1;
@@ -167,7 +167,7 @@ fn send_mouse_move(dx: i32, dy: i32) {
 }
 
 fn send_mouse_wheel(delta: i32) {
-    let mut input = INPUT {
+    let input = INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
             mi: MOUSEINPUT {
