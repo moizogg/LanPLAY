@@ -1,6 +1,7 @@
 //! H.264 decode (OpenH264) for client receive path.
 
 use openh264::decoder::Decoder;
+use openh264::formats::YUVSource;
 use openh264::OpenH264API;
 
 pub struct VideoDecoder {
