@@ -21,6 +21,8 @@ pub struct EncoderSettings {
     pub height: u32,
     pub fps: u32,
     pub bitrate_bps: u32,
+    /// Preferred encoder (`openh264`; HW ids fall back until implemented).
+    pub encoder_id: String,
 }
 
 impl Default for EncoderSettings {
@@ -28,8 +30,9 @@ impl Default for EncoderSettings {
         Self {
             width: 1280,
             height: 720,
-            fps: 60,
+            fps: 30,
             bitrate_bps: 8_000_000,
+            encoder_id: "openh264".into(),
         }
     }
 }
@@ -47,7 +50,14 @@ pub fn probe_encoders() -> Vec<String> {
 }
 
 pub fn create_encoder(settings: EncoderSettings) -> Result<Box<dyn VideoEncoder>, String> {
-    OpenH264Encoder::new(settings).map(|e| Box::new(e) as Box<dyn VideoEncoder>)
+    // HW paths (nvenc/amf/qsv) will branch here; until then OpenH264 is the working path.
+    let id = settings.encoder_id.to_ascii_lowercase();
+    let mut soft = settings;
+    if matches!(id.as_str(), "nvenc" | "amf" | "qsv") {
+        // Not implemented yet — fall back so Host still works with a HW pick in Settings.
+        soft.encoder_id = format!("openh264-fallback-{id}");
+    }
+    OpenH264Encoder::new(soft).map(|e| Box::new(e) as Box<dyn VideoEncoder>)
 }
 
 struct OpenH264Encoder {
@@ -84,7 +94,15 @@ impl OpenH264Encoder {
             height: h,
             force_idr: false,
             ready: false,
-            name: format!("openh264 {}x{}@{} software", w, h, settings.fps),
+            name: if settings.encoder_id.starts_with("openh264-fallback-") {
+                let hw = settings
+                    .encoder_id
+                    .strip_prefix("openh264-fallback-")
+                    .unwrap_or("hw");
+                format!("openh264 {}x{}@{} (fallback; {hw} not ready)", w, h, settings.fps)
+            } else {
+                format!("openh264 {}x{}@{} software", w, h, settings.fps)
+            },
         })
     }
 }

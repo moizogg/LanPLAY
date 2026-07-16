@@ -11,9 +11,8 @@ use lanplay_networking::{
 use lanplay_shared::{
     ClientStatus, ControllerStats, HostStatus, PendingJoinInfo, SessionState,
 };
-use lanplay_video::{
-    run_host_capture_loop, CaptureConfig, CaptureSnapshot, HostCaptureHandle,
-};
+use lanplay_video::{run_host_capture_loop, CaptureSnapshot, HostCaptureHandle, VideoSettings};
+use crate::settings_store;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
@@ -167,14 +166,10 @@ impl SessionManager {
             }
         };
 
-        // Phase 5: desktop capture + H.264 encode (not streamed yet)
-        let capture_handle = run_host_capture_loop(CaptureConfig {
-            output_index: 0,
-            target_fps: 60,
-            encode_max_edge: 1280,
-            bitrate_bps: 8_000_000,
-        })
-        .ok();
+        // Phase 5: capture + encode using Settings tab (applies on Start Host)
+        let video = settings_store::get();
+        let capture_cfg = video.to_capture_config();
+        let capture_handle = run_host_capture_loop(capture_cfg).ok();
 
         let vigem_ok = input_handle.vigem_ok();
         let vigem_detail = input_handle.vigem_detail().to_string();
@@ -184,8 +179,13 @@ impl SessionManager {
         inner.host.virtual_pad_active = false;
         inner.host.pending_join = None;
         inner.host.session_active = false;
+        let res_label = match video.resolution_mode {
+            lanplay_video::ResolutionMode::Auto => format!("auto≤{}", video.max_edge),
+            lanplay_video::ResolutionMode::Fixed => format!("{}x{}", video.width, video.height),
+        };
         inner.host.message = format!(
-            "Listening on control :{control} / input :{media}. Capture+encode running (Phase 5). Accept joins. {vigem_detail}"
+            "Listening :{control}/:{media}. Encode {res_label} @ {}fps / {}kbps ({}) — Phase 5. Accept joins. {vigem_detail}",
+            video.fps, video.bitrate_kbps, video.encoder
         );
 
         inner.host_join = Some(join_handle);
@@ -424,7 +424,16 @@ impl SessionManager {
         }
     }
 
-    /// Phase 4 capture metrics (host only).
+    pub fn get_video_settings(&self) -> VideoSettings {
+        settings_store::get()
+    }
+
+    pub fn set_video_settings(&self, settings: VideoSettings) -> Result<VideoSettings, String> {
+        // Settings apply on next Start Host (capture thread already running otherwise).
+        settings_store::set(settings)
+    }
+
+    /// Phase 4–5 capture metrics (host only).
     pub fn get_capture_stats(&self) -> CaptureSnapshot {
         let inner = self.inner.lock();
         if let Some(ref c) = inner.host_capture {

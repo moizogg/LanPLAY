@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "LANPlay",
-        "width": 920,
-        "height": 680,
+        "width": 960,
+        "height": 760,
         "minWidth": 720,
-        "minHeight": 520,
+        "minHeight": 560,
         "resizable": true,
         "center": true
       }

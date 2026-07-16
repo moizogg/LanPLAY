@@ -7,10 +7,24 @@ import type {
   CaptureStatus,
   ClientStatus,
   ControllerStats,
+  EncoderOption,
   HostStatus,
+  ResolutionPreset,
   TailscaleInfo,
+  VideoSettings,
   VigemBundleStatus,
 } from "./types";
+
+const DEFAULT_VIDEO: VideoSettings = {
+  outputIndex: 0,
+  fps: 30,
+  bitrateKbps: 8000,
+  resolutionMode: "auto",
+  maxEdge: 1280,
+  width: 1280,
+  height: 720,
+  encoder: "openh264",
+};
 
 const RECENT_IPS_KEY = "lanplay.recentHostIps";
 
@@ -68,6 +82,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [recentIps, setRecentIps] = useState<string[]>(() => loadRecentIps());
+  const [videoSettings, setVideoSettings] =
+    useState<VideoSettings>(DEFAULT_VIDEO);
+  const [encoderOptions, setEncoderOptions] = useState<EncoderOption[]>([]);
+  const [resPresets, setResPresets] = useState<ResolutionPreset[]>([]);
+  const [settingsSaved, setSettingsSaved] = useState<string | null>(null);
+  const [settingsDirty, setSettingsDirty] = useState(false);
 
   /** Session/controller metrics only — safe to poll often (no external CLI). */
   const refreshLive = useCallback(async () => {
@@ -107,9 +127,25 @@ export default function App() {
     }
   }, []);
 
+  const loadSettings = useCallback(async () => {
+    try {
+      const [vs, enc, presets] = await Promise.all([
+        invoke<VideoSettings>("get_video_settings"),
+        invoke<EncoderOption[]>("get_encoder_options"),
+        invoke<ResolutionPreset[]>("get_resolution_presets"),
+      ]);
+      setVideoSettings(vs);
+      setEncoderOptions(enc);
+      setResPresets(presets);
+      setSettingsDirty(false);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
-    await Promise.all([refreshLive(), refreshSlow(false)]);
-  }, [refreshLive, refreshSlow]);
+    await Promise.all([refreshLive(), refreshSlow(false), loadSettings()]);
+  }, [refreshLive, refreshSlow, loadSettings]);
 
   useEffect(() => {
     void refresh();
@@ -126,6 +162,62 @@ export default function App() {
       window.clearInterval(slowId);
     };
   }, [refresh, refreshLive, refreshSlow]);
+
+  function patchVideo(patch: Partial<VideoSettings>) {
+    setVideoSettings((prev) => ({ ...prev, ...patch }));
+    setSettingsDirty(true);
+    setSettingsSaved(null);
+  }
+
+  async function onSaveSettings() {
+    setBusy(true);
+    setError(null);
+    setSettingsSaved(null);
+    try {
+      const saved = await invoke<VideoSettings>("set_video_settings", {
+        settings: videoSettings,
+      });
+      setVideoSettings(saved);
+      setSettingsDirty(false);
+      setSettingsSaved(
+        hostListening
+          ? "Saved. Stop Host and Start Host again to apply encode settings."
+          : "Saved. Applied on next Start Host.",
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onResetSettings() {
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await invoke<VideoSettings>("set_video_settings", {
+        settings: DEFAULT_VIDEO,
+      });
+      setVideoSettings(saved);
+      setSettingsDirty(false);
+      setSettingsSaved("Reset to defaults.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function applyPreset(presetId: string) {
+    const p = resPresets.find((x) => x.id === presetId);
+    if (!p) return;
+    patchVideo({
+      resolutionMode: p.mode,
+      width: p.width,
+      height: p.height,
+      maxEdge: p.maxEdge,
+    });
+  }
 
   async function onStartHost() {
     setBusy(true);
@@ -291,7 +383,7 @@ export default function App() {
         </header>
 
         <div className="inline-flex w-fit rounded-xl border border-white/10 bg-black/30 p-1">
-          {(["host", "client"] as const).map((m) => (
+          {(["host", "client", "settings"] as const).map((m) => (
             <button
               key={m}
               type="button"
@@ -337,7 +429,301 @@ export default function App() {
           />
         </section>
 
-        {mode === "host" ? (
+        {mode === "settings" ? (
+          <section className="space-y-5 rounded-2xl border border-white/10 bg-white/[0.03] p-6 shadow-xl shadow-black/30">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-white">
+                  Video &amp; encode settings
+                </h2>
+                <p className="mt-1 text-sm text-slate-400">
+                  Sunshine-style host knobs. Changes apply on{" "}
+                  <span className="text-slate-200">Start Host</span> (restart
+                  host if already running).
+                </p>
+              </div>
+              {settingsDirty && (
+                <span className="rounded-full bg-amber-500/15 px-3 py-1 text-xs font-medium text-amber-200 ring-1 ring-amber-500/30">
+                  unsaved
+                </span>
+              )}
+            </div>
+
+            {/* Resolution */}
+            <div className="space-y-3 rounded-xl border border-white/10 bg-black/30 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Resolution
+              </p>
+              <label className="block text-sm text-slate-300">
+                Preset
+                <select
+                  className="mt-1 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-sm text-white"
+                  value={
+                    videoSettings.resolutionMode === "auto"
+                      ? videoSettings.maxEdge <= 960
+                        ? "auto-960"
+                        : "auto-1280"
+                      : resPresets.find(
+                          (p) =>
+                            p.mode === "fixed" &&
+                            p.width === videoSettings.width &&
+                            p.height === videoSettings.height &&
+                            p.id !== "custom",
+                        )?.id ?? "custom"
+                  }
+                  onChange={(e) => applyPreset(e.target.value)}
+                >
+                  {resPresets.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                <label className="block text-sm text-slate-300">
+                  Mode
+                  <select
+                    className="mt-1 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-sm text-white"
+                    value={videoSettings.resolutionMode}
+                    onChange={(e) =>
+                      patchVideo({
+                        resolutionMode:
+                          e.target.value === "fixed" ? "fixed" : "auto",
+                      })
+                    }
+                  >
+                    <option value="auto">Auto (max edge)</option>
+                    <option value="fixed">Fixed size</option>
+                  </select>
+                </label>
+                {videoSettings.resolutionMode === "auto" ? (
+                  <label className="block text-sm text-slate-300">
+                    Max edge (px)
+                    <input
+                      type="number"
+                      min={320}
+                      max={3840}
+                      step={2}
+                      className="mt-1 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 font-mono text-sm text-white"
+                      value={videoSettings.maxEdge}
+                      onChange={(e) =>
+                        patchVideo({
+                          maxEdge: Number(e.target.value) || 1280,
+                        })
+                      }
+                    />
+                  </label>
+                ) : (
+                  <>
+                    <label className="block text-sm text-slate-300">
+                      Width
+                      <input
+                        type="number"
+                        min={160}
+                        max={3840}
+                        step={2}
+                        className="mt-1 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 font-mono text-sm text-white"
+                        value={videoSettings.width}
+                        onChange={(e) =>
+                          patchVideo({
+                            width: Number(e.target.value) || 1280,
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="block text-sm text-slate-300">
+                      Height
+                      <input
+                        type="number"
+                        min={160}
+                        max={2160}
+                        step={2}
+                        className="mt-1 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 font-mono text-sm text-white"
+                        value={videoSettings.height}
+                        onChange={(e) =>
+                          patchVideo({
+                            height: Number(e.target.value) || 720,
+                          })
+                        }
+                      />
+                    </label>
+                  </>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-600">
+                Software encode: try 960 max edge or 30 FPS if encode ms is high.
+                Hardware NVENC/AMF/QSV will use these same knobs later.
+              </p>
+            </div>
+
+            {/* FPS + bitrate */}
+            <div className="space-y-3 rounded-xl border border-white/10 bg-black/30 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Frame rate &amp; bitrate
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block text-sm text-slate-300">
+                  Target FPS
+                  <input
+                    type="number"
+                    min={5}
+                    max={240}
+                    className="mt-1 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 font-mono text-sm text-white"
+                    value={videoSettings.fps}
+                    onChange={(e) =>
+                      patchVideo({ fps: Number(e.target.value) || 30 })
+                    }
+                  />
+                </label>
+                <label className="block text-sm text-slate-300">
+                  Bitrate (kbps)
+                  <input
+                    type="number"
+                    min={500}
+                    max={100000}
+                    step={500}
+                    className="mt-1 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 font-mono text-sm text-white"
+                    value={videoSettings.bitrateKbps}
+                    onChange={(e) =>
+                      patchVideo({
+                        bitrateKbps: Number(e.target.value) || 8000,
+                      })
+                    }
+                  />
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {[15, 30, 60, 90, 120].map((f) => (
+                  <button
+                    key={f}
+                    type="button"
+                    onClick={() => patchVideo({ fps: f })}
+                    className={`rounded-lg px-2.5 py-1 text-xs font-medium ring-1 transition ${
+                      videoSettings.fps === f
+                        ? "bg-cyan-500/20 text-cyan-200 ring-cyan-500/40"
+                        : "bg-white/5 text-slate-300 ring-white/10 hover:bg-white/10"
+                    }`}
+                  >
+                    {f} FPS
+                  </button>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {[2000, 5000, 8000, 12000, 20000, 40000].map((b) => (
+                  <button
+                    key={b}
+                    type="button"
+                    onClick={() => patchVideo({ bitrateKbps: b })}
+                    className={`rounded-lg px-2.5 py-1 text-xs font-medium ring-1 transition ${
+                      videoSettings.bitrateKbps === b
+                        ? "bg-cyan-500/20 text-cyan-200 ring-cyan-500/40"
+                        : "bg-white/5 text-slate-300 ring-white/10 hover:bg-white/10"
+                    }`}
+                  >
+                    {b >= 1000 ? `${b / 1000} Mbps` : `${b} kbps`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Encoder */}
+            <div className="space-y-3 rounded-xl border border-white/10 bg-black/30 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Encoder
+              </p>
+              <div className="space-y-2">
+                {encoderOptions.map((enc) => (
+                  <label
+                    key={enc.id}
+                    className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition ${
+                      videoSettings.encoder === enc.id
+                        ? "border-cyan-500/40 bg-cyan-500/10"
+                        : "border-white/10 bg-black/20 hover:border-white/20"
+                    } ${!enc.available ? "opacity-70" : ""}`}
+                  >
+                    <input
+                      type="radio"
+                      name="encoder"
+                      className="mt-1"
+                      checked={videoSettings.encoder === enc.id}
+                      onChange={() => patchVideo({ encoder: enc.id })}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-white">
+                        {enc.name}
+                        {enc.hardware && (
+                          <span className="rounded bg-violet-500/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-violet-200">
+                            HW
+                          </span>
+                        )}
+                        {!enc.available && (
+                          <span className="rounded bg-slate-500/30 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-300">
+                            soon
+                          </span>
+                        )}
+                      </span>
+                      <span className="mt-0.5 block text-xs text-slate-500">
+                        {enc.detail}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* Display */}
+            <div className="space-y-3 rounded-xl border border-white/10 bg-black/30 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Capture
+              </p>
+              <label className="block text-sm text-slate-300">
+                Display output index
+                <input
+                  type="number"
+                  min={0}
+                  max={7}
+                  className="mt-1 w-full max-w-[8rem] rounded-lg border border-white/10 bg-slate-900 px-3 py-2 font-mono text-sm text-white"
+                  value={videoSettings.outputIndex}
+                  onChange={(e) =>
+                    patchVideo({
+                      outputIndex: Number(e.target.value) || 0,
+                    })
+                  }
+                />
+                <span className="mt-1 block text-[11px] text-slate-600">
+                  0 = primary monitor. Change if you stream a second display.
+                </span>
+              </label>
+            </div>
+
+            {settingsSaved && (
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+                {settingsSaved}
+              </div>
+            )}
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                disabled={busy || !settingsDirty}
+                onClick={() => void onSaveSettings()}
+                className="rounded-xl bg-cyan-500 px-5 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:opacity-50"
+              >
+                Save settings
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void onResetSettings()}
+                className="rounded-xl border border-white/10 bg-white/5 px-5 py-2.5 text-sm font-medium text-slate-200 transition hover:bg-white/10 disabled:opacity-50"
+              >
+                Reset defaults
+              </button>
+            </div>
+          </section>
+        ) : mode === "host" ? (
           <section className="space-y-4 rounded-2xl border border-white/10 bg-white/[0.03] p-6 shadow-xl shadow-black/30">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-lg font-semibold text-white">Host mode</h2>
@@ -537,8 +923,16 @@ export default function App() {
                 {desktopCapture?.detail ?? "Start Host to begin capture+encode."}
               </p>
               <p className="mt-1 text-[11px] text-slate-600">
-                H.264 encoded in memory — not streamed to client yet (Phase 6).
-                Software OpenH264 now; NVENC/AMF/QSV next.
+                H.264 encoded in memory — not streamed yet (Phase 6). Tune res /
+                FPS / bitrate / encoder in the{" "}
+                <button
+                  type="button"
+                  className="text-cyan-400/90 underline-offset-2 hover:underline"
+                  onClick={() => setMode("settings")}
+                >
+                  Settings
+                </button>{" "}
+                tab.
               </p>
             </div>
 
@@ -725,10 +1119,19 @@ export default function App() {
 
         <footer className="mt-auto space-y-1 text-xs text-slate-600">
           <p>
-            Phase 2: controller UDP. Gamepad support is bundled — one-time
-            driver install from the Host screen if needed.
+            Settings control host capture/encode. Client still receives input
+            only — video stream is Phase 6.
           </p>
-          <p>Next: Phase 3 transport polish, then video capture/encode.</p>
+          <p>
+            Current encode plan:{" "}
+            <span className="font-mono text-slate-500">
+              {videoSettings.resolutionMode === "auto"
+                ? `auto≤${videoSettings.maxEdge}`
+                : `${videoSettings.width}×${videoSettings.height}`}{" "}
+              @ {videoSettings.fps}fps / {videoSettings.bitrateKbps}kbps /{" "}
+              {videoSettings.encoder}
+            </span>
+          </p>
         </footer>
       </div>
     </div>

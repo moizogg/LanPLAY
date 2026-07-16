@@ -1,12 +1,17 @@
 mod session;
+mod settings_store;
 mod tailscale;
 mod vigem_setup;
 
 use lanplay_controllers::{CaptureStatus, VigemBundleStatus};
 use lanplay_protocol::PROTOCOL_VERSION;
 use lanplay_shared::{ClientStatus, ControllerStats, HostStatus, TailscaleInfo};
-use lanplay_video::CaptureSnapshot;
+use lanplay_video::{
+    list_encoder_options, resolution_presets, CaptureSnapshot, EncoderOption, ResolutionPreset,
+    VideoSettings,
+};
 use session::SessionManager;
+use tauri::Manager;
 use tauri::State;
 
 #[tauri::command]
@@ -112,6 +117,29 @@ fn get_capture_stats(session: State<'_, SessionManager>) -> CaptureSnapshot {
     session.get_capture_stats()
 }
 
+#[tauri::command]
+fn get_video_settings(session: State<'_, SessionManager>) -> VideoSettings {
+    session.get_video_settings()
+}
+
+#[tauri::command]
+fn set_video_settings(
+    session: State<'_, SessionManager>,
+    settings: VideoSettings,
+) -> Result<VideoSettings, String> {
+    session.set_video_settings(settings)
+}
+
+#[tauri::command]
+fn get_encoder_options() -> Vec<EncoderOption> {
+    list_encoder_options()
+}
+
+#[tauri::command]
+fn get_resolution_presets() -> Vec<ResolutionPreset> {
+    resolution_presets()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -119,6 +147,12 @@ pub fn run() {
         .manage(SessionManager::new())
         .setup(|app| {
             vigem_setup::init_paths(app.handle());
+            // Persist Settings under OS app config dir (like Sunshine config).
+            if let Ok(dir) = app.path().app_config_dir() {
+                settings_store::init(dir.join("video_settings.json"));
+            } else {
+                settings_store::init(std::path::PathBuf::from("video_settings.json"));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -139,6 +173,10 @@ pub fn run() {
             set_input_capture,
             toggle_input_capture,
             get_capture_stats,
+            get_video_settings,
+            set_video_settings,
+            get_encoder_options,
+            get_resolution_presets,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LANPlay");

@@ -1,4 +1,4 @@
-export type AppMode = "host" | "client";
+export type AppMode = "host" | "client" | "settings";
 
 export type SessionState =
   | "idle"
@@ -93,4 +93,35 @@ export interface CaptureSnapshot {
   bitrateKbps: number;
   encoder: string;
   detail: string;
+}
+
+/** Host video / encode settings (Settings tab, Sunshine-style) */
+export type ResolutionMode = "auto" | "fixed";
+
+export interface VideoSettings {
+  outputIndex: number;
+  fps: number;
+  bitrateKbps: number;
+  resolutionMode: ResolutionMode;
+  maxEdge: number;
+  width: number;
+  height: number;
+  encoder: string;
+}
+
+export interface EncoderOption {
+  id: string;
+  name: string;
+  available: boolean;
+  hardware: boolean;
+  detail: string;
+}
+
+export interface ResolutionPreset {
+  id: string;
+  label: string;
+  mode: ResolutionMode;
+  width: number;
+  height: number;
+  maxEdge: number;
 }

@@ -7,7 +7,7 @@
 | **2 Controllers** | Done enough | Pad + KBM + capture toggle + accept/reject |
 | **3 Networking** | Mostly done | TCP join + UDP; formal transport trait still stub |
 | **4 Desktop capture** | Done | DXGI + FPS stats dogfooded |
-| **5 Encode** | **In progress** | OpenH264 software H.264 + stats; HW next |
+| **5 Encode** | **In progress** | OpenH264 + Settings tab (res/fps/bitrate/encoder); HW next |
 | 6 Video stream | Not started | |
 | 7 Audio | Not started | |
 

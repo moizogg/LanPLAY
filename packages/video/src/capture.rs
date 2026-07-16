@@ -15,18 +15,36 @@ use std::time::Duration;
 pub struct CaptureConfig {
     pub output_index: u32,
     pub target_fps: u32,
-    /// Max long-edge for software encode (e.g. 1280).
+    /// Max long-edge when `fixed_width`/`fixed_height` are unset.
     pub encode_max_edge: u32,
+    /// Optional fixed encode size (even dimensions preferred).
+    pub fixed_width: Option<u32>,
+    pub fixed_height: Option<u32>,
     pub bitrate_bps: u32,
+    /// Encoder id (`openh264`, later nvenc/amf/qsv).
+    pub encoder_id: String,
 }
 
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             output_index: 0,
-            target_fps: 60,
+            target_fps: 30,
             encode_max_edge: 1280,
+            fixed_width: None,
+            fixed_height: None,
             bitrate_bps: 8_000_000,
+            encoder_id: "openh264".into(),
+        }
+    }
+}
+
+impl CaptureConfig {
+    /// Resolve encode size from capture dimensions + settings.
+    pub fn resolve_encode_size(&self, cap_w: u32, cap_h: u32) -> (u32, u32) {
+        match (self.fixed_width, self.fixed_height) {
+            (Some(w), Some(h)) if w >= 16 && h >= 16 => (w.max(16) & !1, h.max(16) & !1),
+            _ => choose_encode_size(cap_w, cap_h, self.encode_max_edge),
         }
     }
 }
@@ -311,21 +329,24 @@ mod windows_dxgi {
             }
         };
 
-        let (ew, eh) = choose_encode_size(backend.width, backend.height, config.encode_max_edge);
+        let (ew, eh) = config.resolve_encode_size(backend.width, backend.height);
         let mut encoder: Option<Box<dyn VideoEncoder>> = match create_encoder(EncoderSettings {
             width: ew,
             height: eh,
             fps: config.target_fps,
             bitrate_bps: config.bitrate_bps,
+            encoder_id: config.encoder_id.clone(),
         }) {
             Ok(e) => {
                 stats.set_encoder_name(e.name().to_string());
                 stats.set_detail(format!(
-                    "Capture {}x{} → encode {}x{} ({})",
+                    "Capture {}x{} → encode {}x{} @ {}fps / {} kbps ({})",
                     backend.width,
                     backend.height,
                     e.width(),
                     e.height(),
+                    config.target_fps,
+                    config.bitrate_bps / 1000,
                     e.name()
                 ));
                 Some(e)
@@ -356,15 +377,15 @@ mod windows_dxgi {
                     let should_encode = last_encode.elapsed() >= encode_interval;
                     if should_encode {
                         if let Some(ref mut enc) = encoder {
-                            // Recreate encoder if capture size changed a lot
-                            let (want_w, want_h) =
-                                choose_encode_size(w, h, config.encode_max_edge);
+                            // Recreate encoder if desired encode size changed
+                            let (want_w, want_h) = config.resolve_encode_size(w, h);
                             if want_w != enc.width() || want_h != enc.height() {
                                 match create_encoder(EncoderSettings {
                                     width: want_w,
                                     height: want_h,
                                     fps: config.target_fps,
                                     bitrate_bps: config.bitrate_bps,
+                                    encoder_id: config.encoder_id.clone(),
                                 }) {
                                     Ok(e) => {
                                         stats.set_encoder_name(e.name().to_string());
