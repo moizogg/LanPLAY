@@ -109,13 +109,13 @@ pub fn bundle_status(driver_ready: bool) -> VigemBundleStatus {
     let detail: String = if driver_ready {
         "Virtual gamepad ready.".to_string()
     } else if setup.is_some() {
-        "Gamepad driver not installed yet. Click Install — LANPlay will run the built-in setup (one-time UAC)."
+        "Gamepad driver not installed yet. Click “Install gamepad support” — one-time Windows UAC (installer is built into LANPlay)."
             .to_string()
     } else if dll.is_some() {
-        "ViGEmClient.dll is bundled but the driver is missing and no installer was packaged. Rebuild with tools/fetch-vigem-redist.ps1."
+        "ViGEmClient.dll found, but the driver installer is missing. Re-download the full lanplay-portable folder from Actions (not just lanplay.exe)."
             .to_string()
     } else {
-        "ViGEm files not packaged. CI should run tools/fetch-vigem-redist.ps1 before build."
+        "ViGEm files not found next to the app. Unzip the full lanplay-windows artifact and run lanplay.exe from that folder (keep the vigem\\ subfolder)."
             .to_string()
     };
 
