@@ -122,8 +122,14 @@ Result: LANPlay falls back to **OpenH264 CPU** → mush; Sunshine stays smooth.
 - Re-encode last desktop + fresh cursor when DXGI is idle (mouse stays live)
 - Probe UI explains MF vs Sunshine/QSV
 
-### Still required for real Sunshine parity
+### Shipped: FFmpeg QSV/NVENC/AMF (process encode)
 
-- **FFmpeg/libavcodec `h264_qsv`** (or NVENC/AMF SDK) with D3D11 frames
-- GPU scale/color convert (no full-frame Map)
+LANPlay now prefers **bundled FFmpeg** `h264_qsv` / `h264_nvenc` / `h264_amf`
+(same encoder family as Sunshine). Frames are still CPU NV12 → pipe (not full
+D3D11 zero-copy), but **encode is on the GPU** — the main lag source on HD 4000.
+
+### Still required for full Sunshine parity
+
+- In-process libavcodec + **D3D11 zero-copy** (no Map / no pipe)
+- GPU scale/color convert
 - Client DXVA/D3D11 decode

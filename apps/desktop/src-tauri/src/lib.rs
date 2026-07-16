@@ -170,6 +170,32 @@ pub fn run() {
         .manage(SessionManager::new())
         .setup(|app| {
             vigem_setup::init_paths(app.handle());
+            // FFmpeg for Sunshine-class QSV/NVENC/AMF encode
+            {
+                let mut roots = Vec::new();
+                if let Ok(dir) = app.path().resource_dir() {
+                    roots.push(dir.join("ffmpeg"));
+                    roots.push(dir.clone());
+                }
+                if let Ok(exe) = std::env::current_exe() {
+                    if let Some(parent) = exe.parent() {
+                        roots.push(parent.join("ffmpeg"));
+                        roots.push(parent.join("resources").join("ffmpeg"));
+                    }
+                }
+                if let Ok(cwd) = std::env::current_dir() {
+                    roots.push(cwd.join("resources").join("ffmpeg"));
+                    roots.push(cwd.join("src-tauri").join("resources").join("ffmpeg"));
+                    roots.push(
+                        cwd.join("apps")
+                            .join("desktop")
+                            .join("src-tauri")
+                            .join("resources")
+                            .join("ffmpeg"),
+                    );
+                }
+                lanplay_video::configure_ffmpeg_search_paths(roots);
+            }
             // Persist Settings under OS app config dir (like Sunshine config).
             if let Ok(dir) = app.path().app_config_dir() {
                 settings_store::init(dir.join("video_settings.json"));

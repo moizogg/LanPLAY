@@ -4,30 +4,45 @@
 
 | Backend | Status | Notes |
 |---------|--------|--------|
-| **Auto** | **Default** | Prefers hardware MF H.264, else OpenH264 |
-| **Hardware H.264 (MF)** | **Active** | Media Foundation HW MFT → NVENC/AMF/QSV silicon when present |
-| **OpenH264** | **Fallback** | Software; always available |
+| **Auto** | **Default** | FFmpeg QSV/NVENC/AMF → MF MFT → FFmpeg x264 → OpenH264 |
+| **QSV (FFmpeg)** | **Active** | `h264_qsv` — Sunshine-class Intel path (HD 4000+) |
+| **NVENC / AMF (FFmpeg)** | **Active** | `h264_nvenc` / `h264_amf` when GPU present |
+| **Hardware H.264 (MF)** | **Fallback** | Media Foundation HW MFT if registered |
+| **FFmpeg libx264** | **Soft fallback** | ultrafast + zerolatency (if ffmpeg present) |
+| **OpenH264** | **Last resort** | Software; always available |
 
 ## Sunshine alignment
 
-Sunshine uses **native NVENC/AMF/QSV SDKs** with GPU-resident textures.  
-LANPlay v1 HW path uses **Windows Media Foundation hardware MFT** + low-latency `ICodecAPI` flags:
+Sunshine uses **FFmpeg / native NVENC/AMF/QSV** with GPU-resident textures.
 
-- `CODECAPI_AVLowLatencyMode`
-- CBR mean bitrate
-- Force keyframe on demand
+LANPlay now prefers the **same FFmpeg encoder names** (`h264_qsv`, `h264_nvenc`, `h264_amf`) via a bundled `ffmpeg.exe` process:
 
-Still converts BGRA→NV12 on CPU before MF (full GPU path is next). That alone is a large win vs pure OpenH264 encode.
+```
+BGRA → NV12 (CPU) → ffmpeg stdin → GPU encode → Annex-B stdout → LPVD
+```
+
+That is **not** full D3D11 zero-copy yet, but encode leaves the CPU — the main reason HD 4000 felt smooth in Sunshine and mushy in LANPlay when stuck on OpenH264.
+
+Media Foundation MFT remains a secondary path when FFmpeg is missing or the codec fails.
+
+## Bundle
+
+```powershell
+pwsh -File tools/fetch-ffmpeg.ps1
+```
+
+CI caches `apps/desktop/src-tauri/resources/ffmpeg/ffmpeg.exe` into portable builds.
+
+Override: `LANPLAY_FFMPEG=C:\path\to\ffmpeg.exe`
 
 ## Settings (defaults)
 
 - Encoder: **auto**
-- Long edge: **1920**
-- ~**25 Mbps**, **60 FPS** target
-- Bilinear scale when downscaling
+- Long edge: **1280**, **30 FPS**, ~**8 Mbps** (raise when on HW)
+- Soft path still clamps ~960p30 if only OpenH264 survives
 
-## Next (true Sunshine-class)
+## Next (full Sunshine-class)
 
-1. DXGI texture → D3D11 VideoProcessor NV12 → MF/D3D manager (no full Map)
-2. Native `nvEncodeAPI64.dll` session (ULL preset, 1-frame VBV)
-3. Client DXVA decode
+1. In-process libavcodec + DXGI → D3D11 → QSV zero-copy (no Map / pipe)
+2. Client DXVA decode
+3. FEC / recovery polish

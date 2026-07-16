@@ -5,6 +5,7 @@
 mod capture;
 mod decode;
 mod encode;
+mod ffmpeg_enc;
 #[cfg(windows)]
 mod mf_h264;
 mod nv12;
@@ -15,6 +16,7 @@ mod stream;
 
 pub use capture::{run_host_capture_loop, CaptureBackend, CaptureConfig, HostCaptureHandle};
 pub use encode::{create_encoder, probe_encoders, EncoderSettings, VideoEncoder};
+pub use ffmpeg_enc::configure_ffmpeg_search_paths;
 pub use settings::{
     list_encoder_options, resolution_presets, EncoderOption, ResolutionMode, ResolutionPreset,
     VideoSettings,
@@ -22,15 +24,21 @@ pub use settings::{
 
 /// Human-readable hardware encoder probe (why software?).
 pub fn hardware_encoder_probe() -> String {
+    let ff = crate::ffmpeg_enc::probe_ffmpeg_caps();
+    let mut parts = vec![ff.detail];
     #[cfg(windows)]
     {
         let _ = crate::mf_h264::hardware_h264_available();
-        crate::mf_h264::last_probe_detail()
+        let mf = crate::mf_h264::last_probe_detail();
+        if !mf.is_empty() {
+            parts.push(format!("MF: {mf}"));
+        }
     }
-    #[cfg(not(windows))]
-    {
-        "Hardware encode only on Windows.".into()
+    let live = crate::ffmpeg_enc::last_ffmpeg_probe();
+    if !live.is_empty() && !parts.iter().any(|p| p == &live) {
+        parts.push(live);
     }
+    parts.join(" · ")
 }
 pub use stats::{AtomicCaptureStats, CaptureSnapshot};
 pub use stream::{

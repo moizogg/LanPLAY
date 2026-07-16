@@ -1016,9 +1016,10 @@ export default function App() {
                 {desktopCapture?.detail ?? "Start Host to begin capture+encode."}
               </p>
               <p className="mt-1 text-[11px] text-slate-600">
-                Check Encoder line: if it says openh264/soft, you are on CPU
-                (lag). Sunshine on HD 4000 uses QSV on the GPU — we only get that
-                when Probe shows a HW MFT. Tune res / FPS in{" "}
+                Want Sunshine-smooth: Encoder should say{" "}
+                <span className="text-emerald-400/90">FFmpeg QSV</span> (or
+                NVENC/AMF). openh264 = CPU mush. Check Settings → Probe. After
+                Update, Stop Host → Start Host.{" "}
                 <button
                   type="button"
                   className="text-cyan-400/90 underline-offset-2 hover:underline"
@@ -1026,7 +1027,6 @@ export default function App() {
                 >
                   Settings
                 </button>
-                .
               </p>
             </div>
 

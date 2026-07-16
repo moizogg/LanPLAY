@@ -62,9 +62,9 @@ impl VideoSettings {
         self.height = self.height.clamp(160, 2160) & !1;
         let enc = self.encoder.to_ascii_lowercase();
         self.encoder = match enc.as_str() {
-            "auto" | "hw" | "hardware" | "mf" => "auto".into(),
+            "auto" | "hw" | "hardware" | "ffmpeg" => "auto".into(),
             "openh264" | "software" => "openh264".into(),
-            "nvenc" | "amf" | "qsv" => enc,
+            "nvenc" | "amf" | "qsv" | "mf" => enc,
             _ => "auto".into(),
         };
         self
@@ -102,43 +102,68 @@ pub struct EncoderOption {
 
 /// Encoders exposed in Settings.
 pub fn list_encoder_options() -> Vec<EncoderOption> {
+    let ff = crate::ffmpeg_enc::probe_ffmpeg_caps();
     #[cfg(windows)]
-    let hw = crate::mf_h264::hardware_h264_available();
+    let mf = crate::mf_h264::hardware_h264_available();
     #[cfg(not(windows))]
-    let hw = false;
+    let mf = false;
+    let any_hw = ff.qsv || ff.nvenc || ff.amf || mf;
 
     vec![
         EncoderOption {
             id: "auto".into(),
-            name: "Auto (hardware preferred)".into(),
+            name: "Auto (Sunshine-class preferred)".into(),
             available: true,
-            hardware: hw,
-            detail: if hw {
-                "Uses Media Foundation HW H.264 (NVENC/AMF/QSV when present), else OpenH264 soft profile."
-                    .into()
+            hardware: any_hw,
+            detail: {
+                let mut s = String::from("Order: FFmpeg QSV/NVENC/AMF → MF MFT → FFmpeg x264 → OpenH264. ");
+                s.push_str(&ff.detail);
+                s
+            },
+        },
+        EncoderOption {
+            id: "qsv".into(),
+            name: "Intel QSV (FFmpeg h264_qsv)".into(),
+            available: ff.qsv,
+            hardware: true,
+            detail: if ff.qsv {
+                "Same Quick Sync path Sunshine uses on HD Graphics / Arc.".into()
+            } else if ff.path.is_some() {
+                "ffmpeg found but no h264_qsv in this build (need full/essentials with QSV).".into()
             } else {
-                "No MF hardware H.264 MFT — OpenH264 soft profile (~960p30). Note: Sunshine uses FFmpeg QSV (not MF); HD 4000 can still stream well in Sunshine while MF is empty."
-                    .into()
+                "ffmpeg not bundled — CI ships it, or set LANPLAY_FFMPEG.".into()
             },
         },
         EncoderOption {
             id: "nvenc".into(),
-            name: "Hardware H.264 (NVENC/MF)".into(),
-            available: hw,
+            name: "NVIDIA NVENC (FFmpeg)".into(),
+            available: ff.nvenc || mf,
             hardware: true,
-            detail: if hw {
-                "Hardware MFT encode — low latency path (driver NVENC/AMF/QSV)."
-                    .into()
+            detail: if ff.nvenc {
+                "FFmpeg h264_nvenc ultra-low-latency.".into()
+            } else if mf {
+                "No ffmpeg NVENC — will try Media Foundation MFT.".into()
             } else {
-                "No hardware H.264 encoder MFT detected on this PC.".into()
+                "NVENC not available.".into()
+            },
+        },
+        EncoderOption {
+            id: "amf".into(),
+            name: "AMD AMF (FFmpeg)".into(),
+            available: ff.amf || mf,
+            hardware: true,
+            detail: if ff.amf {
+                "FFmpeg h264_amf ultralowlatency.".into()
+            } else {
+                "AMF not available via ffmpeg.".into()
             },
         },
         EncoderOption {
             id: "openh264".into(),
-            name: "OpenH264 (software)".into(),
+            name: "OpenH264 (software only)".into(),
             available: true,
             hardware: false,
-            detail: "CPU H.264 — works everywhere; higher latency than HW.".into(),
+            detail: "Forced CPU path — for debugging only.".into(),
         },
     ]
 }

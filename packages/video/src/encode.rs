@@ -1,8 +1,10 @@
 //! H.264 encode backends.
 //!
-//! - **auto / nvenc / amf / qsv**: Windows Media Foundation hardware MFT
-//!   (maps to NVENC/AMF/QSV silicon when the driver exposes it)
-//! - **openh264**: software fallback (always available)
+//! Priority (auto):
+//! 1. **FFmpeg** `h264_qsv` / `h264_nvenc` / `h264_amf` — Sunshine-class HW
+//! 2. **Media Foundation** HW MFT (when registered)
+//! 3. **FFmpeg libx264** ultrafast+zerolatency (if ffmpeg present)
+//! 4. **OpenH264** software soft profile
 
 use openh264::encoder::{Encoder, EncoderConfig, FrameType, UsageType};
 use openh264::formats::{BgraSliceU8, YUVBuffer};
@@ -50,65 +52,91 @@ pub trait VideoEncoder: Send {
 
 pub fn probe_encoders() -> Vec<String> {
     let mut v = vec!["openh264 (software H.264)".into()];
+    let caps = crate::ffmpeg_enc::probe_ffmpeg_caps();
+    if caps.qsv {
+        v.insert(0, "FFmpeg h264_qsv (Intel Quick Sync)".into());
+    }
+    if caps.nvenc {
+        v.insert(0, "FFmpeg h264_nvenc".into());
+    }
+    if caps.amf {
+        v.insert(0, "FFmpeg h264_amf".into());
+    }
+    if caps.x264 {
+        v.push("FFmpeg libx264 ultrafast".into());
+    }
     #[cfg(windows)]
     {
         if crate::mf_h264::hardware_h264_available() {
-            v.insert(
-                0,
-                "hardware H.264 via Media Foundation (NVENC/AMF/QSV)".into(),
-            );
+            v.push("Media Foundation HW H.264 MFT".into());
         }
     }
     v
 }
 
-/// Create encoder. Prefer hardware when `auto` / vendor ids; fall back to OpenH264
-/// with a **low-latency soft profile** (Sunshine-like software defaults: low res/FPS).
+/// Create encoder. Prefer FFmpeg HW (Sunshine path), then MF, then soft.
 pub fn create_encoder(settings: EncoderSettings) -> Result<Box<dyn VideoEncoder>, String> {
     let id = settings.encoder_id.to_ascii_lowercase();
     let want_hw = matches!(
         id.as_str(),
-        "auto" | "nvenc" | "amf" | "qsv" | "hardware" | "hw" | "mf"
+        "auto" | "nvenc" | "amf" | "qsv" | "hardware" | "hw" | "mf" | "ffmpeg"
     );
 
-    let mut hw_err: Option<String> = None;
+    let mut errors: Vec<String> = Vec::new();
 
-    #[cfg(windows)]
-    {
-        if want_hw {
-            match crate::mf_h264::MfHardwareH264Encoder::new(settings.clone()) {
-                Ok(e) => {
-                    return Ok(Box::new(e));
-                }
-                Err(e) => {
-                    hw_err = Some(e);
-                }
+    // --- 1) FFmpeg hardware (QSV/NVENC/AMF) — same silicon Sunshine uses ---
+    if want_hw {
+        let prefer = match id.as_str() {
+            "qsv" => Some(crate::ffmpeg_enc::FfmpegCodec::Qsv),
+            "nvenc" => Some(crate::ffmpeg_enc::FfmpegCodec::Nvenc),
+            "amf" => Some(crate::ffmpeg_enc::FfmpegCodec::Amf),
+            "mf" => None, // skip ffmpeg HW, try MF only below
+            _ => None,    // auto: try all HW codecs
+        };
+        if id != "mf" {
+            match crate::ffmpeg_enc::try_create(settings.clone(), prefer) {
+                Ok(e) => return Ok(Box::new(e)),
+                Err(e) => errors.push(format!("ffmpeg-hw: {e}")),
             }
         }
     }
 
-    #[cfg(not(windows))]
+    // --- 2) Media Foundation HW MFT (Windows) ---
+    #[cfg(windows)]
     {
-        let _ = want_hw;
+        if want_hw && matches!(id.as_str(), "auto" | "hardware" | "hw" | "mf" | "nvenc" | "amf" | "qsv")
+        {
+            match crate::mf_h264::MfHardwareH264Encoder::new(settings.clone()) {
+                Ok(e) => return Ok(Box::new(e)),
+                Err(e) => errors.push(format!("mf: {e}")),
+            }
+        }
     }
 
-    // Software path: clamp for weak CPUs so we don't try 1080p60 OpenH264 (that's the lag).
-    let mut soft = settings;
-    if want_hw || soft.encoder_id.eq_ignore_ascii_case("auto") {
-        soft = soft_low_latency_profile(soft);
-        if let Some(ref e) = hw_err {
-            soft.encoder_id = format!("openh264-no-hw");
-            let mut enc = OpenH264Encoder::new(soft)?;
-            enc.name = format!(
-                "{} | HW failed: {}",
-                enc.name,
-                e.chars().take(80).collect::<String>()
-            );
-            return Ok(Box::new(enc));
-        }
-        soft.encoder_id = "openh264".into();
+    // Forced pure OpenH264
+    if id == "openh264" || id == "software" {
+        let soft = soft_low_latency_profile(settings);
+        return OpenH264Encoder::new(soft).map(|e| Box::new(e) as Box<dyn VideoEncoder>);
     }
-    OpenH264Encoder::new(soft).map(|e| Box::new(e) as Box<dyn VideoEncoder>)
+
+    // --- 3) FFmpeg libx264 ultrafast (much better realtime than OpenH264) ---
+    {
+        let soft = soft_low_latency_profile(settings.clone());
+        match crate::ffmpeg_enc::try_create_x264(soft) {
+            Ok(e) => return Ok(Box::new(e)),
+            Err(e) => errors.push(format!("ffmpeg-x264: {e}")),
+        }
+    }
+
+    // --- 4) OpenH264 soft profile last resort ---
+    let mut soft = soft_low_latency_profile(settings);
+    soft.encoder_id = "openh264-no-hw".into();
+    let mut enc = OpenH264Encoder::new(soft)?;
+    if !errors.is_empty() {
+        let summary: String = errors.join(" · ").chars().take(120).collect();
+        enc.name = format!("{} | {}", enc.name, summary);
+    }
+    Ok(Box::new(enc))
 }
 
 /// When HW encode is unavailable: survival profile so OpenH264 can keep up.

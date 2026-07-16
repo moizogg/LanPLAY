@@ -9,10 +9,13 @@ target/
 **/target/
 *.exe
 !tools/**/*.exe
-# Bundled redist (downloaded by tools/fetch-vigem-redist.ps1 — keep out of git)
+# Bundled redist (downloaded by tools/fetch-*.ps1 — keep out of git)
 apps/desktop/src-tauri/resources/vigem/*
 !apps/desktop/src-tauri/resources/vigem/.gitkeep
 !apps/desktop/src-tauri/resources/vigem/README.md
+apps/desktop/src-tauri/resources/ffmpeg/*
+!apps/desktop/src-tauri/resources/ffmpeg/.gitkeep
+!apps/desktop/src-tauri/resources/ffmpeg/README.md
 *.dll
 !tools/**/*.dll
 
