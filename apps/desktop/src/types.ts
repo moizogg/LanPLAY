@@ -134,6 +134,7 @@ export interface ClientVideoSnapshot {
   fps: number;
   frames: number;
   packets: number;
+  hellosSent: number;
   jpegBase64: string;
   detail: string;
 }

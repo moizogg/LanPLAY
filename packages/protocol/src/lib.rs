@@ -13,9 +13,9 @@ pub use kbm_packet::{
     KBM_PACKET_MAGIC, KBM_PACKET_SIZE, KBM_PACKET_VERSION,
 };
 pub use video_packet::{
-    fragment_access_unit, FrameReassembler, ReassembledFrame, VideoFragmentHeader,
-    VIDEO_FLAG_KEYFRAME, VIDEO_HEADER_SIZE, VIDEO_MAX_PAYLOAD, VIDEO_PACKET_MAGIC,
-    VIDEO_PACKET_VERSION,
+    encode_video_hello, fragment_access_unit, is_video_hello, FrameReassembler, ReassembledFrame,
+    VideoFragmentHeader, VIDEO_FLAG_KEYFRAME, VIDEO_HEADER_SIZE, VIDEO_HELLO_MAGIC,
+    VIDEO_MAX_PAYLOAD, VIDEO_PACKET_MAGIC, VIDEO_PACKET_VERSION,
 };
 
 /// Protocol major — bump when packets become incompatible.

@@ -18,7 +18,6 @@ use lanplay_video::{
     ClientVideoSnapshot, HostCaptureHandle, VideoSenderHandle, VideoSettings, VideoStreamSink,
 };
 use parking_lot::Mutex;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -181,14 +180,13 @@ impl SessionManager {
         let video = settings_store::get();
         let capture_cfg = video.to_capture_config();
         let video_sink = VideoStreamSink::new();
-        let video_sender = video_sink.clone().start_sender().ok();
+        let vport = video_port_from_media(media);
+        let video_sender = video_sink.clone().start_sender(vport).ok();
         let capture_handle =
             run_host_capture_loop(capture_cfg, Some(video_sink.clone())).ok();
 
         let vigem_ok = input_handle.vigem_ok();
         let vigem_detail = input_handle.vigem_detail().to_string();
-        let vport = video_port_from_media(media);
-
         inner.host.vigem_ok = vigem_ok;
         inner.host.state = SessionState::Listening;
         inner.host.virtual_pad_active = false;
@@ -266,19 +264,15 @@ impl SessionManager {
         if accept {
             inner.host.session_active = true;
             inner.host.state = SessionState::Streaming;
-            // Point video UDP at accepted peer (media_port + 1).
-            if let Some(ip) = peer_ip {
-                let vport = video_port_from_media(inner.host.media_port);
-                let addr = SocketAddr::new(ip, vport);
-                if let Some(ref sink) = inner.host_video_sink {
-                    sink.set_peer(Some(addr));
-                }
-                inner.host.message = format!(
-                    "{msg}. Streaming video → {addr}. Client KBM/pad live; pad plugs when controller is stable."
-                );
-            } else {
-                inner.host.message = format!("{msg}. Session active (video peer unresolved).");
+            // Video path: client punches HELLO to host:video_port; host learns return addr.
+            let vport = video_port_from_media(inner.host.media_port);
+            if let Some(ref sink) = inner.host_video_sink {
+                sink.set_peer(None); // clear until HELLO
             }
+            let _ = peer_ip;
+            inner.host.message = format!(
+                "{msg}. Waiting for client video HELLO on :{vport}, then stream. Pad/KBM live."
+            );
         } else {
             inner.host.session_active = false;
             inner.host.state = SessionState::Listening;
@@ -365,21 +359,21 @@ impl SessionManager {
             inner.client.host_ip = Some(ip.clone());
             inner.client.control_port = control_port;
             inner.client.media_port = media_port;
-            // Bind video port early so we don't miss the post-Accept IDR.
+            // Start HELLO punch early so host learns return path as soon as Accept starts encode send.
             let vport = video_port_from_media(media_port);
             if let Some(old) = inner.client_video.take() {
                 old.stop();
             }
-            match run_client_video_loop(vport) {
+            match run_client_video_loop(&ip, vport) {
                 Ok(vh) => {
                     inner.client_video = Some(vh);
                     inner.client.message = format!(
-                        "Requesting to join {ip}… video listen :{vport}. Waiting for Accept."
+                        "Requesting to join {ip}… video HELLO → :{vport}. Waiting for Accept."
                     );
                 }
                 Err(e) => {
                     inner.client.message = format!(
-                        "Requesting to join {ip}… (video bind failed: {e}). Waiting for Accept."
+                        "Requesting to join {ip}… (video failed: {e}). Waiting for Accept."
                     );
                 }
             }
@@ -479,6 +473,7 @@ impl SessionManager {
                 fps: 0.0,
                 frames: 0,
                 packets: 0,
+                hellos_sent: 0,
                 jpeg_base64: String::new(),
                 detail: "Join a host to receive video.".into(),
             }

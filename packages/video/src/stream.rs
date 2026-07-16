@@ -1,8 +1,13 @@
 //! Host video send + client video receive (Phase 6).
+//!
+//! Path: client sends HELLO → host:video_port; host learns peer and sends
+//! LPVD fragments back to that address (NAT/firewall-friendly).
 
 use crate::decode::VideoDecoder;
 use crate::encode::EncodedFrame;
-use lanplay_protocol::{fragment_access_unit, FrameReassembler};
+use lanplay_protocol::{
+    encode_video_hello, fragment_access_unit, is_video_hello, FrameReassembler,
+};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::net::{SocketAddr, UdpSocket};
@@ -19,6 +24,8 @@ pub struct VideoStreamSink {
     peer: Arc<Mutex<Option<SocketAddr>>>,
     force_keyframe: Arc<AtomicBool>,
     packets_sent: Arc<AtomicU64>,
+    hellos_recv: Arc<AtomicU64>,
+    detail: Arc<Mutex<String>>,
 }
 
 struct OutgoingFrame {
@@ -35,21 +42,18 @@ impl VideoStreamSink {
             peer: Arc::new(Mutex::new(None)),
             force_keyframe: Arc::new(AtomicBool::new(false)),
             packets_sent: Arc::new(AtomicU64::new(0)),
+            hellos_recv: Arc::new(AtomicU64::new(0)),
+            detail: Arc::new(Mutex::new("Video sink idle".into())),
         }
-    }
-
-    pub fn peer_handle(&self) -> Arc<Mutex<Option<SocketAddr>>> {
-        Arc::clone(&self.peer)
-    }
-
-    pub fn force_keyframe_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.force_keyframe)
     }
 
     pub fn set_peer(&self, addr: Option<SocketAddr>) {
         *self.peer.lock() = addr;
-        if addr.is_some() {
+        if let Some(a) = addr {
             self.force_keyframe.store(true, Ordering::SeqCst);
+            *self.detail.lock() = format!("Peer set → {a}");
+        } else {
+            *self.detail.lock() = "Peer cleared".into();
         }
     }
 
@@ -57,12 +61,10 @@ impl VideoStreamSink {
         self.force_keyframe.swap(false, Ordering::SeqCst)
     }
 
-    /// True when a client peer is configured for video.
     pub fn has_peer(&self) -> bool {
         self.peer.lock().is_some()
     }
 
-    /// Capture thread: publish latest encoded AU (replaces unread).
     pub fn publish(&self, width: u32, height: u32, frame: EncodedFrame) {
         *self.slot.lock() = Some(OutgoingFrame {
             width,
@@ -75,29 +77,71 @@ impl VideoStreamSink {
         self.packets_sent.load(Ordering::Relaxed)
     }
 
-    /// Spawn host UDP sender (binds ephemeral local port).
-    pub fn start_sender(self) -> lanplay_shared::Result<VideoSenderHandle> {
+    pub fn hellos_recv(&self) -> u64 {
+        self.hellos_recv.load(Ordering::Relaxed)
+    }
+
+    pub fn detail(&self) -> String {
+        self.detail.lock().clone()
+    }
+
+    /// Host binds `video_port`, learns peer from client HELLOs, sends LPVD there.
+    pub fn start_sender(self, video_port: u16) -> lanplay_shared::Result<VideoSenderHandle> {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_t = Arc::clone(&stop);
         let join = thread::Builder::new()
             .name("lanplay-video-send".into())
             .spawn(move || {
-                let sock = match UdpSocket::bind("0.0.0.0:0") {
+                let bind = format!("0.0.0.0:{video_port}");
+                let sock = match UdpSocket::bind(&bind) {
                     Ok(s) => {
-                        let _ = s.set_nonblocking(false);
-                        let _ = s.set_write_timeout(Some(Duration::from_millis(50)));
+                        let _ = s.set_nonblocking(true);
+                        *self.detail.lock() = format!("Host video bound {bind}");
                         s
                     }
                     Err(e) => {
-                        eprintln!("video send bind failed: {e}");
+                        *self.detail.lock() = format!("Host video bind {bind} failed: {e}");
                         return;
                     }
                 };
 
+                let mut buf = [0u8; 64];
+                let mut last_hello_poll = Instant::now();
+
                 while !stop_t.load(Ordering::Relaxed) {
+                    // Drain HELLOs — this is the real client return path.
+                    loop {
+                        match sock.recv_from(&mut buf) {
+                            Ok((n, from)) => {
+                                if is_video_hello(&buf[..n]) {
+                                    self.hellos_recv.fetch_add(1, Ordering::Relaxed);
+                                    let mut peer = self.peer.lock();
+                                    if *peer != Some(from) {
+                                        *peer = Some(from);
+                                        self.force_keyframe.store(true, Ordering::SeqCst);
+                                        *self.detail.lock() =
+                                            format!("HELLO from {from} — streaming");
+                                    }
+                                }
+                            }
+                            Err(e)
+                                if e.kind() == std::io::ErrorKind::WouldBlock
+                                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                            {
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+
                     let peer = *self.peer.lock();
                     let Some(addr) = peer else {
-                        thread::sleep(Duration::from_millis(20));
+                        if last_hello_poll.elapsed() > Duration::from_secs(2) {
+                            *self.detail.lock() =
+                                format!("Waiting for client HELLO on {bind}…");
+                            last_hello_poll = Instant::now();
+                        }
+                        thread::sleep(Duration::from_millis(10));
                         continue;
                     };
 
@@ -121,7 +165,10 @@ impl VideoStreamSink {
                             Ok(_) => {
                                 self.packets_sent.fetch_add(1, Ordering::Relaxed);
                             }
-                            Err(_) => break,
+                            Err(e) => {
+                                *self.detail.lock() = format!("send_to {addr} failed: {e}");
+                                break;
+                            }
                         }
                     }
                 }
@@ -169,6 +216,7 @@ pub struct ClientVideoSnapshot {
     pub fps: f32,
     pub frames: u64,
     pub packets: u64,
+    pub hellos_sent: u64,
     /// JPEG base64 for UI preview (empty if none yet).
     pub jpeg_base64: String,
     pub detail: String,
@@ -179,6 +227,7 @@ struct ClientVideoInner {
     height: AtomicU32,
     frames: AtomicU64,
     packets: AtomicU64,
+    hellos_sent: AtomicU64,
     fps_x100: AtomicU32,
     jpeg_base64: Mutex<String>,
     detail: Mutex<String>,
@@ -192,6 +241,7 @@ impl Default for ClientVideoInner {
             height: AtomicU32::new(0),
             frames: AtomicU64::new(0),
             packets: AtomicU64::new(0),
+            hellos_sent: AtomicU64::new(0),
             fps_x100: AtomicU32::new(0),
             jpeg_base64: Mutex::new(String::new()),
             detail: Mutex::new("Waiting for video…".into()),
@@ -209,6 +259,7 @@ impl ClientVideoInner {
             fps: self.fps_x100.load(Ordering::Relaxed) as f32 / 100.0,
             frames: self.frames.load(Ordering::Relaxed),
             packets: self.packets.load(Ordering::Relaxed),
+            hellos_sent: self.hellos_sent.load(Ordering::Relaxed),
             jpeg_base64: self.jpeg_base64.lock().clone(),
             detail: self.detail.lock().clone(),
         }
@@ -243,8 +294,12 @@ impl Drop for ClientVideoHandle {
     }
 }
 
-/// Bind UDP `video_port` and decode incoming stream for UI preview.
-pub fn run_client_video_loop(video_port: u16) -> lanplay_shared::Result<ClientVideoHandle> {
+/// Client: bind ephemeral UDP, punch HELLO to host:video_port, receive LPVD on same socket.
+pub fn run_client_video_loop(
+    host_ip: &str,
+    video_port: u16,
+) -> lanplay_shared::Result<ClientVideoHandle> {
+    let host_ip = host_ip.trim().to_string();
     let stop = Arc::new(AtomicBool::new(false));
     let state = Arc::new(ClientVideoInner::default());
     let stop_t = Arc::clone(&stop);
@@ -253,7 +308,7 @@ pub fn run_client_video_loop(video_port: u16) -> lanplay_shared::Result<ClientVi
     let join = thread::Builder::new()
         .name("lanplay-video-recv".into())
         .spawn(move || {
-            client_video_thread(video_port, stop_t, state_t);
+            client_video_thread(&host_ip, video_port, stop_t, state_t);
         })
         .map_err(|e| lanplay_shared::LanPlayError::Message(e.to_string()))?;
 
@@ -264,21 +319,33 @@ pub fn run_client_video_loop(video_port: u16) -> lanplay_shared::Result<ClientVi
     })
 }
 
-fn client_video_thread(video_port: u16, stop: Arc<AtomicBool>, state: Arc<ClientVideoInner>) {
+fn client_video_thread(
+    host_ip: &str,
+    video_port: u16,
+    stop: Arc<AtomicBool>,
+    state: Arc<ClientVideoInner>,
+) {
     state.active.store(true, Ordering::Relaxed);
-    let bind = format!("0.0.0.0:{video_port}");
-    let sock = match UdpSocket::bind(&bind) {
+
+    let host_addr: SocketAddr = match format!("{host_ip}:{video_port}").parse() {
+        Ok(a) => a,
+        Err(e) => {
+            *state.detail.lock() = format!("Bad host video addr {host_ip}:{video_port}: {e}");
+            state.active.store(false, Ordering::Relaxed);
+            return;
+        }
+    };
+
+    // Ephemeral local port — HELLO first so firewall/Tailscale learn the path.
+    let sock = match UdpSocket::bind("0.0.0.0:0") {
         Ok(s) => {
             let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
-            *state.detail.lock() = format!("Listening for video on {bind}");
+            *state.detail.lock() = format!("Punching HELLO → {host_addr}");
             s
         }
         Err(e) => {
-            *state.detail.lock() = format!("Video bind failed on {bind}: {e}");
+            *state.detail.lock() = format!("Client video bind failed: {e}");
             state.active.store(false, Ordering::Relaxed);
-            while !stop.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(200));
-            }
             return;
         }
     };
@@ -288,9 +355,6 @@ fn client_video_thread(video_port: u16, stop: Arc<AtomicBool>, state: Arc<Client
         Err(e) => {
             *state.detail.lock() = format!("Decoder init failed: {e}");
             state.active.store(false, Ordering::Relaxed);
-            while !stop.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(200));
-            }
             return;
         }
     };
@@ -299,18 +363,35 @@ fn client_video_thread(video_port: u16, stop: Arc<AtomicBool>, state: Arc<Client
     let mut buf = vec![0u8; 2048];
     let mut frames_window = 0u32;
     let mut window_start = Instant::now();
+    let mut last_hello = Instant::now() - Duration::from_secs(1);
     let mut got_keyframe = false;
+    let hello = encode_video_hello();
 
     while !stop.load(Ordering::Relaxed) {
+        // Keepalive HELLO so host knows where to send (and after Accept).
+        if last_hello.elapsed() >= Duration::from_millis(250) {
+            match sock.send_to(&hello, host_addr) {
+                Ok(_) => {
+                    state.hellos_sent.fetch_add(1, Ordering::Relaxed);
+                    last_hello = Instant::now();
+                }
+                Err(e) => {
+                    *state.detail.lock() = format!("HELLO send failed: {e}");
+                }
+            }
+        }
+
         match sock.recv_from(&mut buf) {
             Ok((n, _src)) => {
+                if is_video_hello(&buf[..n]) {
+                    continue;
+                }
                 state.packets.fetch_add(1, Ordering::Relaxed);
                 if let Some(frame) = reasm.push(&buf[..n]) {
                     if frame.keyframe {
                         got_keyframe = true;
                     }
                     if !got_keyframe && !frame.keyframe {
-                        // Wait for IDR after join.
                         continue;
                     }
                     match decoder.decode_to_rgba(&frame.data) {
@@ -323,19 +404,20 @@ fn client_video_thread(video_port: u16, stop: Arc<AtomicBool>, state: Arc<Client
                             if let Some(jpeg) = rgba_to_jpeg_preview(&rgba, w, h, 640) {
                                 *state.jpeg_base64.lock() = jpeg;
                                 *state.detail.lock() =
-                                    format!("Streaming {w}x{h} (JPEG preview ≤640)");
+                                    format!("Streaming {w}x{h} (preview ≤640)");
                             }
                         }
                         Ok(None) => {}
                         Err(e) => {
                             *state.detail.lock() = format!("Decode error: {e}");
-                            // Request recovery by waiting for next keyframe
                             got_keyframe = false;
                         }
                     }
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(e) => {
                 *state.detail.lock() = format!("recv error: {e}");
                 thread::sleep(Duration::from_millis(50));
@@ -344,9 +426,10 @@ fn client_video_thread(video_port: u16, stop: Arc<AtomicBool>, state: Arc<Client
 
         if window_start.elapsed() >= Duration::from_secs(1) {
             let secs = window_start.elapsed().as_secs_f32().max(0.001);
-            state
-                .fps_x100
-                .store(((frames_window as f32 / secs) * 100.0) as u32, Ordering::Relaxed);
+            state.fps_x100.store(
+                ((frames_window as f32 / secs) * 100.0) as u32,
+                Ordering::Relaxed,
+            );
             frames_window = 0;
             window_start = Instant::now();
         }
@@ -393,12 +476,13 @@ fn rgba_to_jpeg_preview(rgba: &[u8], w: u32, h: u32, max_edge: u32) -> Option<St
     let mut cursor = Cursor::new(Vec::new());
     let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 55);
-    encoder.encode(rgb.as_raw(), dw, dh, image::ExtendedColorType::Rgb8).ok()?;
+    encoder
+        .encode(rgb.as_raw(), dw, dh, image::ExtendedColorType::Rgb8)
+        .ok()?;
     Some(base64_encode(cursor.into_inner()))
 }
 
 fn base64_encode(data: Vec<u8>) -> String {
-    // Minimal base64 without extra dep
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
     for chunk in data.chunks(3) {

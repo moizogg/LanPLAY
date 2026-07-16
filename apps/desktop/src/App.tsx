@@ -1074,8 +1074,9 @@ export default function App() {
                   )}
                 </div>
                 <p className="border-t border-white/5 px-3 py-2 text-[11px] text-slate-600">
-                  {clientVideo?.detail ?? "—"} · packets{" "}
-                  {clientVideo?.packets ?? 0} · UDP port {mediaPort + 1}
+                  {clientVideo?.detail ?? "—"} · pkts{" "}
+                  {clientVideo?.packets ?? 0} · hellos{" "}
+                  {clientVideo?.hellosSent ?? 0} · host video :{mediaPort + 1}
                 </p>
               </div>
             )}

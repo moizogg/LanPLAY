@@ -10,14 +10,31 @@
 //! payload...
 //! ```
 
-/// ASCII "LPVD" — LANPlay Video.
+/// ASCII "LPVD" — LANPlay Video (fragmented H.264).
 pub const VIDEO_PACKET_MAGIC: u32 = 0x4C50_5644;
+/// ASCII "LPVH" — client hello / keep-alive so host learns return path.
+pub const VIDEO_HELLO_MAGIC: u32 = 0x4C50_5648;
 pub const VIDEO_PACKET_VERSION: u8 = 1;
 pub const VIDEO_HEADER_SIZE: usize = 28;
 /// Keep UDP datagrams under ~1200 bytes on typical paths.
 pub const VIDEO_MAX_PAYLOAD: usize = 1100;
 
 pub const VIDEO_FLAG_KEYFRAME: u8 = 1 << 0;
+
+/// 8-byte hello: magic + version + reserved.
+pub fn encode_video_hello() -> [u8; 8] {
+    let mut b = [0u8; 8];
+    b[0..4].copy_from_slice(&VIDEO_HELLO_MAGIC.to_le_bytes());
+    b[4] = VIDEO_PACKET_VERSION;
+    b
+}
+
+pub fn is_video_hello(buf: &[u8]) -> bool {
+    if buf.len() < 4 {
+        return false;
+    }
+    u32::from_le_bytes(buf[0..4].try_into().unwrap_or([0; 4])) == VIDEO_HELLO_MAGIC
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoFragmentHeader {
