@@ -6,7 +6,7 @@ mod join;
 mod stub;
 
 pub use join::{
-    client_request_join, local_client_name, run_host_join_listener, HostJoinHandle, JoinDecision,
-    PendingJoin,
+    client_request_join, local_client_name, run_host_join_listener, ClientControlSession,
+    HostJoinHandle, JoinDecision, PendingJoin,
 };
 pub use stub::{default_ports, NetworkTransport, StubTransport};

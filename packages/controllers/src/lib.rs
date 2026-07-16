@@ -1,10 +1,7 @@
 //! Controller + input subsystem.
 //!
-//! **Correct product flow**
-//! - Host Start = listen only (no virtual pad)
-//! - Client Connect = sends keyboard/mouse + controller state to host
-//! - Host creates virtual Xbox 360 **only** when client has a physical controller
-//! - Game runs on host; client is the remote player
+//! Host creates virtual Xbox 360 only after client controller reports stay stable.
+//! Client stops sending when control TCP dies (host Stop Host).
 
 mod host;
 mod packet_stats;
@@ -36,6 +33,8 @@ pub struct ClientInputHandle {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
     stats: Arc<AtomicInputStats>,
+    /// Shared with control-session watch — cleared when host drops TCP.
+    session_alive: Arc<AtomicBool>,
 }
 
 impl ClientInputHandle {
@@ -43,8 +42,13 @@ impl ClientInputHandle {
         Arc::clone(&self.stats)
     }
 
+    pub fn session_alive(&self) -> bool {
+        self.session_alive.load(Ordering::Relaxed) && !self.stop.load(Ordering::Relaxed)
+    }
+
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        self.session_alive.store(false, Ordering::SeqCst);
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
@@ -54,27 +58,30 @@ impl ClientInputHandle {
 impl Drop for ClientInputHandle {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        self.session_alive.store(false, Ordering::SeqCst);
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
     }
 }
 
-/// Spawn client input thread. Sends to `host:media_port` over UDP.
+/// Spawn client input thread. Stops when `session_alive` goes false (host stopped).
 pub fn run_client_input_loop(
     host_ip: String,
     media_port: u16,
     poll_hz: u32,
+    session_alive: Arc<AtomicBool>,
 ) -> lanplay_shared::Result<ClientInputHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(AtomicInputStats::default());
     let stop_t = Arc::clone(&stop);
     let stats_t = Arc::clone(&stats);
+    let alive_t = Arc::clone(&session_alive);
 
     let join = thread::Builder::new()
         .name("lanplay-client-input".into())
         .spawn(move || {
-            client_loop(host_ip, media_port, poll_hz, stop_t, stats_t);
+            client_loop(host_ip, media_port, poll_hz, stop_t, alive_t, stats_t);
         })
         .map_err(|e| lanplay_shared::LanPlayError::Message(e.to_string()))?;
 
@@ -82,6 +89,7 @@ pub fn run_client_input_loop(
         stop,
         join: Some(join),
         stats,
+        session_alive,
     })
 }
 
@@ -90,6 +98,7 @@ fn client_loop(
     media_port: u16,
     poll_hz: u32,
     stop: Arc<AtomicBool>,
+    session_alive: Arc<AtomicBool>,
     stats: Arc<AtomicInputStats>,
 ) {
     let addr: SocketAddr = match format!("{host_ip}:{media_port}").parse() {
@@ -112,33 +121,65 @@ fn client_loop(
     let period = Duration::from_micros((1_000_000u64 / poll_hz.max(30) as u64).max(1));
     let mut seq: u32 = 0;
     let mut kbm_state = ClientKbmState::default();
+    // Hysteresis for XInput flapping
+    let mut pad_seen_streak: u32 = 0;
+    let mut pad_lost_streak: u32 = 0;
+    let mut pad_active = false;
+
     stats.set_detail(format!(
-        "Sending keyboard/mouse + controller to {addr}. Plug a pad to become Player 2 on host."
+        "Sending KBM + controller to {addr}. Stops if host ends the session."
     ));
 
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
         seq = seq.wrapping_add(1);
 
-        // 1) Keyboard / mouse always while connected
         let kbm = sample_kbm_on_client(&mut kbm_state, seq);
-        let kbm_bytes = kbm.encode();
-        let _ = sock.send_to(&kbm_bytes, addr);
+        let _ = sock.send_to(&kbm.encode(), addr);
 
-        // 2) Controller: connected flag only if physical pad present
-        let pad = poll_xinput(0);
-        let mut packet = if pad.connected {
+        let sample = poll_xinput(0);
+        if sample.connected {
+            pad_seen_streak = pad_seen_streak.saturating_add(1);
+            pad_lost_streak = 0;
+            if !pad_active && pad_seen_streak >= 5 {
+                pad_active = true;
+            }
+        } else {
+            pad_lost_streak = pad_lost_streak.saturating_add(1);
+            pad_seen_streak = 0;
+            if pad_active && pad_lost_streak >= 15 {
+                pad_active = false;
+            }
+        }
+
+        // Only claim connected when hysteresis says pad is stable
+        let mut packet = if pad_active && sample.connected {
             InputPacket {
                 controller_id: 0,
                 flags: FLAG_CONNECTED,
                 seq,
                 client_ts_us: 0,
-                buttons: pad.buttons,
-                left_trigger: pad.left_trigger,
-                right_trigger: pad.right_trigger,
-                thumb_lx: pad.thumb_lx,
-                thumb_ly: pad.thumb_ly,
-                thumb_rx: pad.thumb_rx,
-                thumb_ry: pad.thumb_ry,
+                buttons: sample.buttons,
+                left_trigger: sample.left_trigger,
+                right_trigger: sample.right_trigger,
+                thumb_lx: sample.thumb_lx,
+                thumb_ly: sample.thumb_ly,
+                thumb_rx: sample.thumb_rx,
+                thumb_ry: sample.thumb_ry,
+            }
+        } else if pad_active {
+            // Brief XInput glitch — still send last-known connected empty-ish? better send connected with zeros
+            InputPacket {
+                controller_id: 0,
+                flags: FLAG_CONNECTED,
+                seq,
+                client_ts_us: 0,
+                buttons: 0,
+                left_trigger: 0,
+                right_trigger: 0,
+                thumb_lx: 0,
+                thumb_ly: 0,
+                thumb_rx: 0,
+                thumb_ry: 0,
             }
         } else {
             InputPacket::now_disconnected(0, seq)
@@ -146,14 +187,18 @@ fn client_loop(
         packet.stamp_now();
 
         match sock.send_to(&packet.encode(), addr) {
-            Ok(_) => {
-                stats.record_send(seq, pad.connected);
-            }
+            Ok(_) => stats.record_send(seq, pad_active),
             Err(e) => {
-                stats.set_detail(format!("send error: {e}"));
+                // Host gone / network error — end session so UI resets
+                stats.set_detail(format!("send error (host may have stopped): {e}"));
+                session_alive.store(false, Ordering::SeqCst);
+                break;
             }
         }
 
         thread::sleep(period);
     }
+
+    stats.set_detail("Client input stopped (session ended).".into());
+    session_alive.store(false, Ordering::SeqCst);
 }

@@ -1,12 +1,12 @@
-//! Session: join accept/reject + UDP input after approval.
+//! Session: join accept/reject + UDP input after approval + live disconnect.
 
 use lanplay_controllers::{
     poll_xinput, probe_vigem, run_client_input_loop, run_host_input_loop, ClientInputHandle,
     HostInputConfig, HostInputHandle,
 };
 use lanplay_networking::{
-    client_request_join, default_ports, local_client_name, run_host_join_listener, HostJoinHandle,
-    JoinDecision,
+    client_request_join, default_ports, local_client_name, run_host_join_listener,
+    ClientControlSession, HostJoinHandle, JoinDecision,
 };
 use lanplay_shared::{
     ClientStatus, ControllerStats, HostStatus, PendingJoinInfo, SessionState,
@@ -26,6 +26,7 @@ struct SessionInner {
     host_input: Option<HostInputHandle>,
     host_join: Option<HostJoinHandle>,
     client_input: Option<ClientInputHandle>,
+    client_control: Option<ClientControlSession>,
     allow_remote_input: bool,
 }
 
@@ -61,6 +62,7 @@ impl Default for SessionInner {
             host_input: None,
             host_join: None,
             client_input: None,
+            client_control: None,
             allow_remote_input: true,
         }
     }
@@ -97,8 +99,10 @@ impl SessionManager {
                 detail: inner.host.message.clone(),
             }
         } else if inner.client_input.is_some()
-            || inner.client.state == SessionState::WaitingApproval
-            || inner.client.state == SessionState::Connecting
+            || matches!(
+                inner.client.state,
+                SessionState::WaitingApproval | SessionState::Connecting | SessionState::Streaming
+            )
         {
             Self::refresh_client_metrics(&mut inner);
             ControllerStats {
@@ -167,7 +171,7 @@ impl SessionManager {
         inner.host.pending_join = None;
         inner.host.session_active = false;
         inner.host.message = format!(
-            "Listening on control :{control} / input :{media}. Waiting for a client join request — then Accept or Reject. {vigem_detail}"
+            "Listening on control :{control} / input :{media}. Accept join requests to start a session. {vigem_detail}"
         );
 
         inner.host_join = Some(join_handle);
@@ -177,11 +181,12 @@ impl SessionManager {
 
     pub fn stop_host(&self) -> Result<HostStatus, String> {
         let mut inner = self.inner.lock();
-        if let Some(h) = inner.host_input.take() {
-            h.stop();
-        }
+        // Closing join handle shuts down accepted TCP → client detects host gone
         if let Some(j) = inner.host_join.take() {
             j.stop();
+        }
+        if let Some(h) = inner.host_input.take() {
+            h.stop();
         }
         inner.host.state = SessionState::Idle;
         inner.host.packets_received = 0;
@@ -190,7 +195,7 @@ impl SessionManager {
         inner.host.virtual_pad_active = false;
         inner.host.pending_join = None;
         inner.host.session_active = false;
-        inner.host.message = "Host stopped.".into();
+        inner.host.message = "Host stopped. Clients will disconnect.".into();
         Ok(inner.host.clone())
     }
 
@@ -210,7 +215,7 @@ impl SessionManager {
             inner.host.session_active = true;
             inner.host.state = SessionState::Streaming;
             inner.host.message = format!(
-                "{msg}. Client may now send keyboard/mouse/controller. Virtual pad only if they plug a pad."
+                "{msg}. Client can send keyboard/mouse. Virtual pad only after their controller is stable."
             );
         } else {
             inner.host.session_active = false;
@@ -224,7 +229,6 @@ impl SessionManager {
         let mut inner = self.inner.lock();
         inner.allow_remote_input = allow;
         inner.host.allow_remote_input = allow;
-        // Restart only UDP path if running, keep join listener peer
         if inner.host_input.is_some() && inner.host_join.is_some() {
             if let Some(h) = inner.host_input.take() {
                 h.stop();
@@ -281,6 +285,7 @@ impl SessionManager {
                 return Err("Stop the host session before connecting as client.".into());
             }
             if inner.client_input.is_some()
+                || inner.client_control.is_some()
                 || matches!(
                     inner.client.state,
                     SessionState::Connecting
@@ -299,7 +304,6 @@ impl SessionManager {
                 format!("Requesting to join {ip}… waiting for host to Accept or Reject.");
         }
 
-        // Non-blocking for UI: wait for Accept/Reject on a background thread.
         let mgr = self.inner.clone();
         let name = local_client_name();
         let ip_bg = ip.clone();
@@ -309,32 +313,33 @@ impl SessionManager {
                 let join_result =
                     client_request_join(&ip_bg, control_port, &name, Duration::from_secs(120));
                 let mut inner = mgr.lock();
-                // Cancelled / disconnected while waiting?
                 if !matches!(inner.client.state, SessionState::WaitingApproval) {
+                    if let Ok(ctrl) = join_result {
+                        ctrl.stop();
+                    }
                     return;
                 }
                 match join_result {
-                    Ok(()) => match run_client_input_loop(ip_bg.clone(), media_port, 250) {
-                        Ok(handle) => {
-                            inner.client_input = Some(handle);
-                            inner.client.state = SessionState::Streaming;
-                            let pad = poll_xinput(0).connected;
-                            inner.client.local_pad_connected = pad;
-                            inner.client.message = if pad {
-                                format!(
-                                    "Host accepted! Sending keyboard/mouse + controller → {ip_bg}."
-                                )
-                            } else {
-                                format!(
-                                    "Host accepted! Sending keyboard/mouse → {ip_bg}. Plug a controller for virtual pad on host."
-                                )
-                            };
+                    Ok(ctrl) => {
+                        let alive = ctrl.alive_flag();
+                        match run_client_input_loop(ip_bg.clone(), media_port, 250, alive) {
+                            Ok(handle) => {
+                                inner.client_control = Some(ctrl);
+                                inner.client_input = Some(handle);
+                                inner.client.state = SessionState::Streaming;
+                                let pad = poll_xinput(0).connected;
+                                inner.client.local_pad_connected = pad;
+                                inner.client.message = format!(
+                                    "Host accepted! Live to {ip_bg}. (Session ends if host stops.)"
+                                );
+                            }
+                            Err(e) => {
+                                ctrl.stop();
+                                inner.client.state = SessionState::Error;
+                                inner.client.message = e.to_string();
+                            }
                         }
-                        Err(e) => {
-                            inner.client.state = SessionState::Error;
-                            inner.client.message = e.to_string();
-                        }
-                    },
+                    }
                     Err(reason) => {
                         inner.client.state = SessionState::Error;
                         inner.client.message = format!("Join failed: {reason}");
@@ -351,6 +356,9 @@ impl SessionManager {
         if let Some(c) = inner.client_input.take() {
             c.stop();
         }
+        if let Some(c) = inner.client_control.take() {
+            c.stop();
+        }
         inner.client.state = SessionState::Idle;
         inner.client.packets_sent = 0;
         inner.client.last_seq = 0;
@@ -364,20 +372,17 @@ impl SessionManager {
                 peer_ip: p.peer_ip,
                 client_name: p.client_name,
             });
-            inner.host.session_active = join.has_accepted_session();
-            if inner.host.session_active && inner.host.state == SessionState::Listening {
-                inner.host.state = SessionState::Streaming;
-            }
-            if !inner.host.session_active
-                && inner.host.pending_join.is_none()
-                && inner.host.state == SessionState::Streaming
-            {
-                // peer left
+            let active = join.has_accepted_session();
+            if inner.host.session_active && !active {
+                inner.host.session_active = false;
                 inner.host.state = SessionState::Listening;
-                if !inner.host.message.contains("left") {
-                    inner.host.message =
-                        "Client session ended. Waiting for a new join request.".into();
-                }
+                inner.host.message =
+                    "Client disconnected. Waiting for a new join request.".into();
+            } else {
+                inner.host.session_active = active;
+            }
+            if active && inner.host.state == SessionState::Listening {
+                inner.host.state = SessionState::Streaming;
             }
         }
 
@@ -388,11 +393,9 @@ impl SessionManager {
             inner.host.input_latency_ms = s.latency_ms();
             inner.host.virtual_pad_active = h.virtual_pad_active();
             let detail = s.detail();
-            if inner.host.pending_join.is_some() {
-                // Prefer join prompt message
-            } else if !detail.is_empty() && s.packets() > 0 {
+            if inner.host.pending_join.is_none() && !detail.is_empty() && s.packets() > 0 {
                 inner.host.message = format!(
-                    "{} — pkts {} · virtual_pad={}",
+                    "{} · pkts {} · pad={}",
                     detail,
                     s.packets(),
                     if h.virtual_pad_active() { "ON" } else { "off" }
@@ -402,6 +405,36 @@ impl SessionManager {
     }
 
     fn refresh_client_metrics(inner: &mut SessionInner) {
+        // Host stopped → control TCP dies → session_alive false → reset UI to idle
+        let control_dead = inner
+            .client_control
+            .as_ref()
+            .is_some_and(|c| !c.is_alive());
+        let input_dead = inner
+            .client_input
+            .as_ref()
+            .is_some_and(|c| !c.session_alive());
+
+        if (control_dead || input_dead)
+            && matches!(
+                inner.client.state,
+                SessionState::Streaming | SessionState::WaitingApproval
+            )
+        {
+            if let Some(c) = inner.client_input.take() {
+                c.stop();
+            }
+            if let Some(c) = inner.client_control.take() {
+                c.stop();
+            }
+            inner.client.state = SessionState::Idle;
+            inner.client.packets_sent = 0;
+            inner.client.last_seq = 0;
+            inner.client.message =
+                "Host stopped or connection lost. You can Request to join again.".into();
+            return;
+        }
+
         if let Some(ref c) = inner.client_input {
             let s = c.stats();
             inner.client.packets_sent = s.packets();

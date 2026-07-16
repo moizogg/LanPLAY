@@ -3,8 +3,8 @@
 use lanplay_protocol::PROTOCOL_VERSION;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
-use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -13,14 +13,9 @@ use std::time::Duration;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WireMsg {
-    Join {
-        name: String,
-        protocol: u16,
-    },
+    Join { name: String, protocol: u16 },
     Accept {},
-    Reject {
-        reason: String,
-    },
+    Reject { reason: String },
 }
 
 /// Visible to the Host UI while waiting for Accept/Reject.
@@ -50,8 +45,9 @@ pub struct HostJoinHandle {
     pending: Arc<Mutex<Option<PendingInner>>>,
     /// After Accept, only this IP may send UDP input.
     allowed_peer: Arc<Mutex<Option<IpAddr>>>,
-    /// TCP to accepted client (kept open for disconnect detection later).
+    /// TCP to accepted client (kept open for disconnect detection).
     accepted: Arc<Mutex<Option<TcpStream>>>,
+    control_port: u16,
 }
 
 impl HostJoinHandle {
@@ -80,12 +76,10 @@ impl HostJoinHandle {
             JoinDecision::Accept => {
                 let msg = WireMsg::Accept {};
                 write_msg(&mut p.stream, &msg).map_err(|e| e.to_string())?;
+                let _ = p.stream.set_nodelay(true);
                 *self.allowed_peer.lock() = Some(p.peer_ip);
                 *self.accepted.lock() = Some(p.stream);
-                Ok(format!(
-                    "Accepted {} ({})",
-                    p.client_name, p.peer_ip
-                ))
+                Ok(format!("Accepted {} ({})", p.client_name, p.peer_ip))
             }
             JoinDecision::Reject => {
                 let msg = WireMsg::Reject {
@@ -100,11 +94,17 @@ impl HostJoinHandle {
 
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        // Accept loop is non-blocking; it will exit within ~100ms.
+        // Wake non-blocking accept loop
+        let _ = TcpStream::connect_timeout(
+            &SocketAddr::from(([127, 0, 0, 1], self.control_port)),
+            Duration::from_millis(200),
+        );
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
-        *self.pending.lock() = None;
+        if let Some(mut p) = self.pending.lock().take() {
+            let _ = p.stream.shutdown(Shutdown::Both);
+        }
         *self.allowed_peer.lock() = None;
         if let Some(s) = self.accepted.lock().take() {
             let _ = s.shutdown(Shutdown::Both);
@@ -115,7 +115,9 @@ impl HostJoinHandle {
 impl Drop for HostJoinHandle {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        *self.pending.lock() = None;
+        if let Some(mut p) = self.pending.lock().take() {
+            let _ = p.stream.shutdown(Shutdown::Both);
+        }
         *self.allowed_peer.lock() = None;
         if let Some(s) = self.accepted.lock().take() {
             let _ = s.shutdown(Shutdown::Both);
@@ -132,8 +134,8 @@ pub fn run_host_join_listener(control_port: u16) -> lanplay_shared::Result<HostJ
         .map_err(lanplay_shared::LanPlayError::from)?;
 
     let stop = Arc::new(AtomicBool::new(false));
-    let pending = Arc::new(Mutex::new(None));
-    let allowed_peer = Arc::new(Mutex::new(None));
+    let pending: Arc<Mutex<Option<PendingInner>>> = Arc::new(Mutex::new(None));
+    let allowed_peer: Arc<Mutex<Option<IpAddr>>> = Arc::new(Mutex::new(None));
     let accepted: Arc<Mutex<Option<TcpStream>>> = Arc::new(Mutex::new(None));
 
     let stop_t = Arc::clone(&stop);
@@ -149,8 +151,8 @@ pub fn run_host_join_listener(control_port: u16) -> lanplay_shared::Result<HostJ
                     Ok((mut stream, addr)) => {
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+                        let _ = stream.set_nodelay(true);
 
-                        // Only one session / one pending at a time
                         if allowed_t.lock().is_some() {
                             let _ = write_msg(
                                 &mut stream,
@@ -197,10 +199,7 @@ pub fn run_host_join_listener(control_port: u16) -> lanplay_shared::Result<HostJ
                                     stream,
                                 });
                             }
-                            Ok(_) => {
-                                let _ = stream.shutdown(Shutdown::Both);
-                            }
-                            Err(_) => {
+                            Ok(_) | Err(_) => {
                                 let _ = stream.shutdown(Shutdown::Both);
                             }
                         }
@@ -213,28 +212,27 @@ pub fn run_host_join_listener(control_port: u16) -> lanplay_shared::Result<HostJ
                     }
                 }
 
-                // Drop accepted TCP if peer closed (optional cleanup)
-                let mut acc = accepted_t.lock();
-                if let Some(ref s) = *acc {
-                    let mut buf = [0u8; 1];
-                    s.set_nonblocking(true).ok();
-                    match s.peek(&mut buf) {
-                        Ok(0) => {
-                            // peer closed
-                            *allowed_t.lock() = None;
-                            *acc = None;
-                        }
-                        Ok(_) => {}
-                        Err(e)
-                            if e.kind() == std::io::ErrorKind::WouldBlock
-                                || e.kind() == std::io::ErrorKind::TimedOut => {}
-                        Err(_) => {
-                            *allowed_t.lock() = None;
-                            *acc = None;
+                // Detect accepted client TCP drop
+                let mut drop_session = false;
+                {
+                    let acc = accepted_t.lock();
+                    if let Some(ref s) = *acc {
+                        let mut buf = [0u8; 1];
+                        let _ = s.set_read_timeout(Some(Duration::from_millis(1)));
+                        match s.peek(&mut buf) {
+                            Ok(0) => drop_session = true,
+                            Ok(_) => {}
+                            Err(e)
+                                if e.kind() == std::io::ErrorKind::WouldBlock
+                                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+                            Err(_) => drop_session = true,
                         }
                     }
-                    if let Some(ref s) = *acc {
-                        let _ = s.set_nonblocking(false);
+                }
+                if drop_session {
+                    *allowed_t.lock() = None;
+                    if let Some(s) = accepted_t.lock().take() {
+                        let _ = s.shutdown(Shutdown::Both);
                     }
                 }
             }
@@ -247,16 +245,50 @@ pub fn run_host_join_listener(control_port: u16) -> lanplay_shared::Result<HostJ
         pending,
         allowed_peer,
         accepted,
+        control_port,
     })
 }
 
+/// Client session after host Accept — holds TCP for live disconnect detection.
+pub struct ClientControlSession {
+    stream: TcpStream,
+    alive: Arc<AtomicBool>,
+    watch: Option<JoinHandle<()>>,
+}
+
+impl ClientControlSession {
+    pub fn alive_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.alive)
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    pub fn stop(mut self) {
+        self.alive.store(false, Ordering::SeqCst);
+        let _ = self.stream.shutdown(Shutdown::Both);
+        if let Some(j) = self.watch.take() {
+            let _ = j.join();
+        }
+    }
+}
+
+impl Drop for ClientControlSession {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::SeqCst);
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
 /// Client: TCP join request; blocks until Accept/Reject or timeout.
+/// On Accept returns a live session (TCP held open).
 pub fn client_request_join(
     host_ip: &str,
     control_port: u16,
     client_name: &str,
     timeout: Duration,
-) -> Result<(), String> {
+) -> Result<ClientControlSession, String> {
     let addr = format!("{host_ip}:{control_port}");
     let mut stream = TcpStream::connect_timeout(
         &addr
@@ -272,6 +304,7 @@ pub fn client_request_join(
     stream
         .set_write_timeout(Some(Duration::from_secs(10)))
         .map_err(|e| e.to_string())?;
+    let _ = stream.set_nodelay(true);
 
     write_msg(
         &mut stream,
@@ -284,9 +317,34 @@ pub fn client_request_join(
 
     match read_msg(&mut stream).map_err(|e| e.to_string())? {
         WireMsg::Accept {} => {
-            // Keep TCP open so host can detect disconnect — leak into thread
-            std::mem::forget(stream);
-            Ok(())
+            let alive = Arc::new(AtomicBool::new(true));
+            let alive_w = Arc::clone(&alive);
+            let mut watch_stream = stream
+                .try_clone()
+                .map_err(|e| format!("clone control socket: {e}"))?;
+
+            let watch = thread::Builder::new()
+                .name("lanplay-client-control-watch".into())
+                .spawn(move || {
+                    // Block until host closes the TCP (Stop Host) or error
+                    let _ = watch_stream.set_read_timeout(None);
+                    let mut buf = [0u8; 64];
+                    loop {
+                        match watch_stream.read(&mut buf) {
+                            Ok(0) => break, // host closed
+                            Ok(_) => {}     // ignore unexpected data
+                            Err(_) => break,
+                        }
+                    }
+                    alive_w.store(false, Ordering::SeqCst);
+                })
+                .map_err(|e| e.to_string())?;
+
+            Ok(ClientControlSession {
+                stream,
+                alive,
+                watch: Some(watch),
+            })
         }
         WireMsg::Reject { reason } => Err(reason),
         WireMsg::Join { .. } => Err("Unexpected message from host.".into()),

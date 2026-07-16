@@ -1,9 +1,7 @@
 //! Host UDP receive loop.
 //!
-//! - Start Host = listen only (NO virtual pad).
-//! - Virtual Xbox 360 appears only when a **client** reports a connected controller.
-//! - Virtual pad is removed when client disconnects / unplugs pad / host stops.
-//! - Keyboard/mouse from client is injected when remote input is allowed.
+//! Virtual pad is debounced: only create after sustained "connected" reports,
+//! only remove after sustained disconnect / timeout (no plug/unplug spam).
 
 use crate::packet_stats::AtomicInputStats;
 use crate::virtual_pad::{create_virtual_pad, probe_vigem, VirtualPadBackend};
@@ -22,14 +20,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// Shared host-side pad lifecycle flags for the UI.
 #[derive(Clone, Default)]
 pub struct HostPadFlags {
-    /// 0 = none, 1 = virtual pad plugged for remote client controller
     pub virtual_active: Arc<AtomicU8>,
 }
 
 pub struct HostInputConfig {
     pub media_port: u16,
     pub allow_remote_input: bool,
-    /// Only accept UDP from this peer after host Accept. Shared with join listener.
     pub allowed_peer: Arc<Mutex<Option<IpAddr>>>,
 }
 
@@ -85,12 +81,11 @@ pub fn run_host_input_loop(config: HostInputConfig) -> lanplay_shared::Result<Ho
     let stats = Arc::new(AtomicInputStats::default());
     let pad_flags = HostPadFlags::default();
 
-    // Probe bus only — do NOT create a virtual pad here.
     let probe = probe_vigem();
     let vigem_ok = probe.available;
     let vigem_detail = probe.detail.clone();
     stats.set_detail(format!(
-        "Listening — waiting for client. No virtual pad until client connects a controller. ({})",
+        "Listening — accept a client first. Virtual pad only after their controller stays connected. ({})",
         vigem_detail
     ));
 
@@ -104,7 +99,15 @@ pub fn run_host_input_loop(config: HostInputConfig) -> lanplay_shared::Result<Ho
     let join = thread::Builder::new()
         .name("lanplay-host-input".into())
         .spawn(move || {
-            host_loop(port, allow, stop_t, stats_t, flags_t, vigem_ok, allowed_peer);
+            host_loop(
+                port,
+                allow,
+                stop_t,
+                stats_t,
+                flags_t,
+                vigem_ok,
+                allowed_peer,
+            );
         })
         .map_err(|e| lanplay_shared::LanPlayError::Message(e.to_string()))?;
 
@@ -135,56 +138,53 @@ fn host_loop(
             return;
         }
     };
-    let _ = sock.set_read_timeout(Some(Duration::from_millis(100)));
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(50)));
     stats.set_detail(format!(
-        "Listening on {bind}. Waiting for you to Accept a client join. Then KBM + pad from that client only."
+        "Listening on {bind}. UDP accepted only from approved client."
     ));
 
     let mut buf = [0u8; 256];
-    let mut last_seq: Option<u32> = None;
     let mut pad: Option<Box<dyn VirtualPadBackend>> = None;
-    let mut last_pad_packet = Instant::now();
     let mut kbm_state = HostKbmState::default();
-    let mut last_client_seen = Instant::now();
-    let mut client_seen = false;
 
-    // If no pad packet for this long while pad is up, unplug (client gone / unplugged).
-    const PAD_TIMEOUT: Duration = Duration::from_secs(2);
-    const CLIENT_IDLE: Duration = Duration::from_secs(3);
+    // Debounce: avoid USB plug/unplug spam from flaky XInput reports
+    let mut connected_streak: u32 = 0;
+    let mut disconnected_streak: u32 = 0;
+    let mut last_connected_seen: Option<Instant> = None;
+    let mut last_log = Instant::now();
+
+    /// Need this many consecutive "connected" packets before creating ViGEm target.
+    const CREATE_STREAK: u32 = 8; // ~8 * 4ms ≈ 32ms at 250Hz
+    /// Need this many consecutive "disconnected" OR silence before removing.
+    const DESTROY_STREAK: u32 = 40; // ~160ms of "no pad"
+    const DESTROY_SILENCE: Duration = Duration::from_millis(400);
 
     while !stop.load(Ordering::Relaxed) {
-        // Timeout virtual pad if client stopped sending connected pad state
-        if pad.is_some() && last_pad_packet.elapsed() > PAD_TIMEOUT {
-            if let Some(mut p) = pad.take() {
-                let _ = p.unplug();
-            }
-            pad_flags.virtual_active.store(0, Ordering::Relaxed);
-            stats.set_detail(
-                "Client controller gone / timed out — virtual Xbox 360 removed.",
-            );
-        }
-
-        if client_seen && last_client_seen.elapsed() > CLIENT_IDLE {
-            client_seen = false;
-            if pad.is_none() {
-                stats.set_detail(
-                    "No client packets — still listening. No virtual pad until client controller.",
-                );
+        // Silence timeout: client stopped reporting a connected pad
+        if pad.is_some() {
+            if let Some(t) = last_connected_seen {
+                if t.elapsed() > DESTROY_SILENCE {
+                    if let Some(mut p) = pad.take() {
+                        let _ = p.unplug();
+                    }
+                    pad_flags.virtual_active.store(0, Ordering::Relaxed);
+                    connected_streak = 0;
+                    disconnected_streak = 0;
+                    last_connected_seen = None;
+                    stats.set_detail(
+                        "Virtual pad removed (client controller silent / unplugged).",
+                    );
+                }
             }
         }
 
         match sock.recv_from(&mut buf) {
             Ok((n, from)) if n >= 4 => {
-                // Ignore UDP until host Accepted this peer
                 let allowed = *allowed_peer.lock();
                 match allowed {
                     Some(ip) if ip == from.ip() => {}
-                    Some(_) => continue, // other peer
-                    None => continue,    // not accepted yet
+                    _ => continue,
                 }
-
-                last_client_seen = Instant::now();
-                client_seen = true;
 
                 let magic = match packet_magic(&buf[..n]) {
                     Some(m) => m,
@@ -196,7 +196,6 @@ fn host_loop(
                         Ok(p) => p,
                         Err(_) => continue,
                     };
-                    last_seq = Some(packet.seq);
 
                     let now = unix_micros();
                     let latency = now.saturating_sub(packet.client_ts_us);
@@ -208,40 +207,57 @@ fn host_loop(
                     }
 
                     if packet.is_connected() {
-                        last_pad_packet = Instant::now();
-                        // Create virtual pad only when client has a real controller
-                        if pad.is_none() {
+                        connected_streak = connected_streak.saturating_add(1);
+                        disconnected_streak = 0;
+                        last_connected_seen = Some(Instant::now());
+
+                        // Create only after sustained connected reports
+                        if pad.is_none() && connected_streak >= CREATE_STREAK {
                             if !vigem_ok {
-                                stats.set_detail(
-                                    "Client has a controller but ViGEmBus is not ready — install driver.",
-                                );
+                                if last_log.elapsed() > Duration::from_secs(2) {
+                                    stats.set_detail(
+                                        "Client has controller but ViGEmBus not ready — install driver.",
+                                    );
+                                    last_log = Instant::now();
+                                }
                             } else {
                                 match create_virtual_pad() {
                                     Ok(p) => {
                                         stats.set_detail(
-                                            "Client controller connected → virtual Xbox 360 created on host.",
+                                            "Client controller stable → virtual Xbox 360 on host.",
                                         );
                                         pad_flags.virtual_active.store(1, Ordering::Relaxed);
                                         pad = Some(p);
                                     }
                                     Err(e) => {
-                                        stats.set_detail(format!("Could not create virtual pad: {e}"));
+                                        stats.set_detail(format!("create virtual pad failed: {e}"));
                                     }
                                 }
                             }
                         }
+
                         if let Some(ref mut p) = pad {
                             if let Err(e) = p.apply(&packet) {
-                                stats.set_detail(format!("pad apply error: {e}"));
+                                if last_log.elapsed() > Duration::from_secs(1) {
+                                    stats.set_detail(format!("pad apply error: {e}"));
+                                    last_log = Instant::now();
+                                }
                             }
                         }
                     } else {
-                        // Client explicitly has no pad — remove virtual device
-                        if let Some(mut p) = pad.take() {
-                            let _ = p.unplug();
+                        // Do NOT unplug on a single disconnected packet
+                        disconnected_streak = disconnected_streak.saturating_add(1);
+                        connected_streak = 0;
+
+                        if pad.is_some() && disconnected_streak >= DESTROY_STREAK {
+                            if let Some(mut p) = pad.take() {
+                                let _ = p.unplug();
+                            }
                             pad_flags.virtual_active.store(0, Ordering::Relaxed);
+                            last_connected_seen = None;
+                            disconnected_streak = 0;
                             stats.set_detail(
-                                "Client has no controller — virtual Xbox 360 removed.",
+                                "Client reports no controller (stable) — virtual pad removed.",
                             );
                         }
                     }
@@ -254,11 +270,6 @@ fn host_loop(
                         Err(_) => continue,
                     };
                     apply_kbm_on_host(&mut kbm_state, &packet);
-                    if pad.is_none() {
-                        stats.set_detail(
-                            "Receiving client keyboard/mouse. Virtual pad appears only if they plug a controller.",
-                        );
-                    }
                 }
             }
             Ok(_) => {}
@@ -266,18 +277,19 @@ fn host_loop(
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(e) => {
-                stats.set_detail(format!("recv error: {e}"));
+                if last_log.elapsed() > Duration::from_secs(2) {
+                    stats.set_detail(format!("recv error: {e}"));
+                    last_log = Instant::now();
+                }
                 thread::sleep(Duration::from_millis(50));
             }
         }
     }
 
-    // Host stop: always remove virtual pad
     if let Some(mut p) = pad.take() {
         let _ = p.unplug();
     }
     pad_flags.virtual_active.store(0, Ordering::Relaxed);
-    let _ = last_seq;
 }
 
 fn unix_micros() -> u64 {
