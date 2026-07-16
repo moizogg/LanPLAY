@@ -102,7 +102,7 @@ impl HostJoinHandle {
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
-        if let Some(mut p) = self.pending.lock().take() {
+        if let Some(p) = self.pending.lock().take() {
             let _ = p.stream.shutdown(Shutdown::Both);
         }
         *self.allowed_peer.lock() = None;
@@ -115,7 +115,7 @@ impl HostJoinHandle {
 impl Drop for HostJoinHandle {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(mut p) = self.pending.lock().take() {
+        if let Some(p) = self.pending.lock().take() {
             let _ = p.stream.shutdown(Shutdown::Both);
         }
         *self.allowed_peer.lock() = None;

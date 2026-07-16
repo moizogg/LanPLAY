@@ -199,6 +199,6 @@ fn client_loop(
         thread::sleep(period);
     }
 
-    stats.set_detail("Client input stopped (session ended).".into());
+    stats.set_detail("Client input stopped (session ended).");
     session_alive.store(false, Ordering::SeqCst);
 }
