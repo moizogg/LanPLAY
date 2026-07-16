@@ -15,13 +15,17 @@
 
 Sunshine uses **FFmpeg / native NVENC/AMF/QSV** with GPU-resident textures.
 
-LANPlay now prefers the **same FFmpeg encoder names** (`h264_qsv`, `h264_nvenc`, `h264_amf`) via a bundled `ffmpeg.exe` process:
+LANPlay now prefers the **same FFmpeg encoder names** (`h264_qsv`, `h264_nvenc`, `h264_amf`) via a bundled `ffmpeg.exe` process, fed by a **D3D11 Video Processor** path:
 
 ```
-BGRA → NV12 (CPU) → ffmpeg stdin → GPU encode → Annex-B stdout → LPVD
+DXGI desktop (GPU)
+  → D3D11 VPP scale + RGB→NV12 (GPU)
+  → Map encode-sized NV12 only
+  → ffmpeg stdin → QSV/NVENC/AMF
+  → Annex-B → LPVD
 ```
 
-That is **not** full D3D11 zero-copy yet, but encode leaves the CPU — the main reason HD 4000 felt smooth in Sunshine and mushy in LANPlay when stuck on OpenH264.
+Fallback if VPP unavailable: CPU BGRA path (older behavior).
 
 Media Foundation MFT remains a secondary path when FFmpeg is missing or the codec fails.
 

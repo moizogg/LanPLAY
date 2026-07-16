@@ -3,6 +3,8 @@
 //! Capture → encode (H.264) → stream → decode → present.
 
 mod capture;
+#[cfg(windows)]
+mod d3d11_gpu;
 mod decode;
 mod encode;
 mod ffmpeg_enc;

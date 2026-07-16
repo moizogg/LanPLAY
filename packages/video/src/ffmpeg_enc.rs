@@ -638,43 +638,27 @@ impl FfmpegEncoder {
     }
 }
 
-impl VideoEncoder for FfmpegEncoder {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn width(&self) -> u32 {
-        self.width
-    }
-    fn height(&self) -> u32 {
-        self.height
-    }
-    fn target_fps(&self) -> u32 {
-        self.fps
-    }
-    fn force_keyframe(&mut self) {
-        // Pipe mode: GOP handles periodic IDR. Optional future: restart or zmq.
-    }
-
-    fn encode_bgra(&mut self, bgra: &[u8], pts_us: u64) -> Result<Option<EncodedFrame>, String> {
-        let nv12 = bgra_to_nv12(bgra, self.width, self.height)?;
+impl FfmpegEncoder {
+    fn submit_nv12(&mut self, nv12: &[u8], pts_us: u64) -> Result<Option<EncodedFrame>, String> {
+        let expected = (self.width * self.height * 3 / 2) as usize;
+        if nv12.len() < expected {
+            return Err(format!("NV12 too small: {} < {expected}", nv12.len()));
+        }
         self.stdin
-            .write_all(&nv12)
+            .write_all(&nv12[..expected])
             .map_err(|e| format!("ffmpeg stdin write: {e}"))?;
-        // Flush each frame so QSV sees it immediately
         self.stdin
             .flush()
             .map_err(|e| format!("ffmpeg stdin flush: {e}"))?;
         self.pts_queue.push_back(pts_us);
         self.frames_in += 1;
 
-        // First frames may buffer; wait a bit longer until we have output.
         let wait = if self.frames_out == 0 {
             Duration::from_millis(250)
         } else {
             Duration::from_millis(80)
         };
         let Some(fr) = self.drain_one(wait) else {
-            // Still warming up / async depth — not fatal
             if self.started.elapsed() > Duration::from_secs(3) && self.frames_out == 0 {
                 return Err(
                     "ffmpeg produced no output for 3s — encoder may have failed (check Probe)"
@@ -691,6 +675,36 @@ impl VideoEncoder for FfmpegEncoder {
             keyframe: fr.keyframe,
             pts_us: pts,
         }))
+    }
+}
+
+impl VideoEncoder for FfmpegEncoder {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn width(&self) -> u32 {
+        self.width
+    }
+    fn height(&self) -> u32 {
+        self.height
+    }
+    fn target_fps(&self) -> u32 {
+        self.fps
+    }
+    fn prefers_nv12(&self) -> bool {
+        true
+    }
+    fn force_keyframe(&mut self) {
+        // Pipe mode: GOP handles periodic IDR.
+    }
+
+    fn encode_bgra(&mut self, bgra: &[u8], pts_us: u64) -> Result<Option<EncodedFrame>, String> {
+        let nv12 = bgra_to_nv12(bgra, self.width, self.height)?;
+        self.submit_nv12(&nv12, pts_us)
+    }
+
+    fn encode_nv12(&mut self, nv12: &[u8], pts_us: u64) -> Result<Option<EncodedFrame>, String> {
+        self.submit_nv12(nv12, pts_us)
     }
 }
 

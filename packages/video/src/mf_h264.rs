@@ -480,26 +480,12 @@ fn soften_for_old_igpu(w: u32, h: u32, fps: u32) -> (u32, u32, u32) {
     (w, h, fps.min(30))
 }
 
-impl VideoEncoder for MfHardwareH264Encoder {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn width(&self) -> u32 {
-        self.width
-    }
-    fn height(&self) -> u32 {
-        self.height
-    }
-    fn target_fps(&self) -> u32 {
-        self.fps
-    }
-    fn force_keyframe(&mut self) {
-        self.force_idr = true;
-    }
-
-    fn encode_bgra(&mut self, bgra: &[u8], pts_us: u64) -> Result<Option<EncodedFrame>, String> {
-        let nv12 = bgra_to_nv12(bgra, self.width, self.height)?;
-
+impl MfHardwareH264Encoder {
+    fn submit_nv12(&mut self, nv12: &[u8], pts_us: u64) -> Result<Option<EncodedFrame>, String> {
+        let expected = (self.width * self.height * 3 / 2) as usize;
+        if nv12.len() < expected {
+            return Err(format!("NV12 too small: {} < {expected}", nv12.len()));
+        }
         unsafe {
             if self.force_idr {
                 if let Ok(api) = self.transform.cast::<ICodecAPI>() {
@@ -508,7 +494,7 @@ impl VideoEncoder for MfHardwareH264Encoder {
                 self.force_idr = false;
             }
 
-            let buffer = MFCreateMemoryBuffer(nv12.len() as u32).map_err(me)?;
+            let buffer = MFCreateMemoryBuffer(expected as u32).map_err(me)?;
             let mut ptr: *mut u8 = std::ptr::null_mut();
             let mut max_len = 0u32;
             buffer
@@ -518,12 +504,12 @@ impl VideoEncoder for MfHardwareH264Encoder {
                 std::ptr::copy_nonoverlapping(
                     nv12.as_ptr(),
                     ptr,
-                    nv12.len().min(max_len as usize),
+                    expected.min(max_len as usize),
                 );
             }
             let _ = buffer.Unlock();
             buffer
-                .SetCurrentLength(nv12.len() as u32)
+                .SetCurrentLength(expected as u32)
                 .map_err(me)?;
 
             let sample = MFCreateSample().map_err(me)?;
@@ -531,7 +517,7 @@ impl VideoEncoder for MfHardwareH264Encoder {
             sample
                 .SetSampleTime((pts_us as i64).saturating_mul(10))
                 .map_err(me)?;
-            let _ = sample.SetSampleDuration(10_000_000 / 30);
+            let _ = sample.SetSampleDuration(10_000_000 / self.fps.max(1) as i64);
 
             self.transform
                 .ProcessInput(0, &sample, 0)
@@ -547,6 +533,36 @@ impl VideoEncoder for MfHardwareH264Encoder {
                 pts_us,
             }))
         }
+    }
+}
+
+impl VideoEncoder for MfHardwareH264Encoder {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn width(&self) -> u32 {
+        self.width
+    }
+    fn height(&self) -> u32 {
+        self.height
+    }
+    fn target_fps(&self) -> u32 {
+        self.fps
+    }
+    fn prefers_nv12(&self) -> bool {
+        true
+    }
+    fn force_keyframe(&mut self) {
+        self.force_idr = true;
+    }
+
+    fn encode_bgra(&mut self, bgra: &[u8], pts_us: u64) -> Result<Option<EncodedFrame>, String> {
+        let nv12 = bgra_to_nv12(bgra, self.width, self.height)?;
+        self.submit_nv12(&nv12, pts_us)
+    }
+
+    fn encode_nv12(&mut self, nv12: &[u8], pts_us: u64) -> Result<Option<EncodedFrame>, String> {
+        self.submit_nv12(nv12, pts_us)
     }
 }
 

@@ -528,10 +528,247 @@ mod windows_dxgi {
         stop: Arc<AtomicBool>,
         stats: Arc<AtomicCaptureStats>,
     ) {
+        // Sunshine-class path first: DXGI stays on GPU → VPP → encode-sized NV12.
+        if run_gpu_path(&config, &video_sink, &stop, &stats) {
+            return;
+        }
+        stats.set_detail("GPU VPP path unavailable — CPU capture fallback…");
+        run_cpu_path(config, video_sink, stop, stats);
+    }
+
+    /// D3D11 Video Processor path (Sunshine display_vram-style convert).
+    /// Returns true if it ran to stop (success), false if GPU path couldn't start.
+    fn run_gpu_path(
+        config: &CaptureConfig,
+        video_sink: &Option<VideoStreamSink>,
+        stop: &Arc<AtomicBool>,
+        stats: &Arc<AtomicCaptureStats>,
+    ) -> bool {
+        // Provisional encode size from a cheap desktop probe via DXGI open sizes.
+        let probe = match DxgiCapture::open(config.output_index) {
+            Ok(b) => b,
+            Err(e) => {
+                stats.set_detail(format!("GPU path: capture probe failed: {e}"));
+                return false;
+            }
+        };
+        let (ew0, eh0) = config.resolve_encode_size(probe.width, probe.height);
+        drop(probe);
+
+        // Create encoder first so soft/HW clamps define true enc size.
+        let mut encoder: Box<dyn VideoEncoder> = match create_encoder(EncoderSettings {
+            width: ew0,
+            height: eh0,
+            fps: config.target_fps,
+            bitrate_bps: config.bitrate_bps,
+            encoder_id: config.encoder_id.clone(),
+        }) {
+            Ok(e) => e,
+            Err(e) => {
+                stats.set_detail(format!("GPU path: encoder init failed: {e}"));
+                return false;
+            }
+        };
+
+        if !encoder.prefers_nv12() {
+            stats.set_detail(format!(
+                "GPU path: encoder {} wants BGRA — CPU fallback",
+                encoder.name()
+            ));
+            return false;
+        }
+
+        let mut gpu = match crate::d3d11_gpu::GpuDesktopPipeline::open(
+            config.output_index,
+            encoder.width(),
+            encoder.height(),
+        ) {
+            Ok(g) => g,
+            Err(e) => {
+                stats.set_detail(format!("GPU VPP open failed: {e}"));
+                return false;
+            }
+        };
+
+        let (cap_w, cap_h) = gpu.cap_size();
+        stats.set_encoder_name(format!("{} + D3D11 VPP", encoder.name()));
+        stats.set_detail(format!(
+            "D3D11 GPU path: {}x{} → VPP NV12 {}x{} @ {}fps ({})",
+            cap_w,
+            cap_h,
+            encoder.width(),
+            encoder.height(),
+            encoder.target_fps(),
+            encoder.name()
+        ));
+
+        let encode_fps = encoder.target_fps().max(1);
+        let encode_interval = Duration::from_secs_f64(1.0 / encode_fps as f64);
+        let mut last_encode = Instant::now() - encode_interval;
+        let mut last_idr = Instant::now();
+        let mut next_encode_deadline = Instant::now();
+        let mut frames_window = 0u32;
+        let mut encode_window = 0u32;
+        let mut bytes_window = 0u64;
+        let mut window_start = Instant::now();
+
+        while !stop.load(Ordering::Relaxed) {
+            let t0 = Instant::now();
+            let should_encode =
+                last_encode.elapsed() >= encode_interval || t0 >= next_encode_deadline;
+
+            match gpu.capture_nv12(should_encode) {
+                Ok(Some(())) => {
+                    let capture_us = t0.elapsed().as_micros() as u64;
+                    let (cw, ch) = gpu.cap_size();
+                    stats.record_frame(cw, ch, capture_us);
+                    frames_window += 1;
+
+                    // Cursor on encode-sized NV12 (no full-desktop BGRA map).
+                    let mut nv12 = gpu.last_nv12.clone();
+                    crate::d3d11_gpu::stamp_cursor_nv12(
+                        &mut nv12,
+                        encoder.width(),
+                        encoder.height(),
+                        cw,
+                        ch,
+                    );
+
+                    if let Some(ref sink) = video_sink {
+                        let need_idr = sink.take_force_keyframe()
+                            || (sink.has_peer() && last_idr.elapsed() >= Duration::from_secs(2));
+                        if need_idr {
+                            encoder.force_keyframe();
+                            last_idr = Instant::now();
+                        }
+                    }
+
+                    let t1 = Instant::now();
+                    match encoder.encode_nv12(&nv12, t0.elapsed().as_micros() as u64) {
+                        Ok(Some(frame)) => {
+                            let encode_us = t1.elapsed().as_micros() as u64;
+                            stats.record_encode(
+                                encoder.width(),
+                                encoder.height(),
+                                encode_us,
+                                frame.data.len(),
+                            );
+                            encode_window += 1;
+                            bytes_window += frame.data.len() as u64;
+                            last_encode = Instant::now();
+                            next_encode_deadline = last_encode + encode_interval;
+                            if let Some(ref sink) = video_sink {
+                                sink.publish(encoder.width(), encoder.height(), frame);
+                            }
+                        }
+                        Ok(None) => {
+                            last_encode = Instant::now();
+                            next_encode_deadline = last_encode + encode_interval;
+                        }
+                        Err(e) => {
+                            stats.set_detail(format!("GPU encode error: {e}"));
+                            last_encode = Instant::now();
+                            next_encode_deadline = last_encode + encode_interval;
+                        }
+                    }
+                }
+                Ok(None) => {
+                    if should_encode && gpu.has_frame {
+                        let (cw, ch) = gpu.cap_size();
+                        let mut nv12 = gpu.last_nv12.clone();
+                        crate::d3d11_gpu::stamp_cursor_nv12(
+                            &mut nv12,
+                            encoder.width(),
+                            encoder.height(),
+                            cw,
+                            ch,
+                        );
+                        if let Some(ref sink) = video_sink {
+                            if sink.take_force_keyframe() {
+                                encoder.force_keyframe();
+                            }
+                        }
+                        let t1 = Instant::now();
+                        match encoder.encode_nv12(&nv12, t0.elapsed().as_micros() as u64) {
+                            Ok(Some(frame)) => {
+                                let encode_us = t1.elapsed().as_micros() as u64;
+                                stats.record_encode(
+                                    encoder.width(),
+                                    encoder.height(),
+                                    encode_us,
+                                    frame.data.len(),
+                                );
+                                encode_window += 1;
+                                bytes_window += frame.data.len() as u64;
+                                last_encode = Instant::now();
+                                next_encode_deadline = last_encode + encode_interval;
+                                if let Some(ref sink) = video_sink {
+                                    sink.publish(encoder.width(), encoder.height(), frame);
+                                }
+                            }
+                            Ok(None) => {
+                                last_encode = Instant::now();
+                                next_encode_deadline = last_encode + encode_interval;
+                            }
+                            Err(e) => {
+                                stats.set_detail(format!("GPU encode error: {e}"));
+                                last_encode = Instant::now();
+                                next_encode_deadline = last_encode + encode_interval;
+                            }
+                        }
+                    } else if !should_encode {
+                        let now = Instant::now();
+                        if now < next_encode_deadline {
+                            thread::sleep(
+                                (next_encode_deadline - now).min(Duration::from_millis(8)),
+                            );
+                        }
+                    } else {
+                        next_encode_deadline = Instant::now() + encode_interval;
+                    }
+                }
+                Err(e) if e == "ACCESS_LOST" => {
+                    stats.set_detail("GPU path: display mode changed — reopening…");
+                    if let Err(e2) = gpu.reopen() {
+                        stats.set_detail(format!("GPU reopen failed: {e2} — CPU fallback"));
+                        // Fall through to CPU by returning false? Already running.
+                        // Keep trying reopen.
+                        thread::sleep(Duration::from_millis(200));
+                    }
+                }
+                Err(e) => {
+                    stats.set_detail(format!("GPU capture error: {e}"));
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+
+            if window_start.elapsed() >= Duration::from_secs(1) {
+                let secs = window_start.elapsed().as_secs_f32().max(0.001);
+                stats.set_fps(frames_window as f32 / secs);
+                stats.set_encode_fps(encode_window as f32 / secs);
+                stats.set_bitrate_kbps(((bytes_window * 8) as f32 / secs / 1000.0) as u32);
+                frames_window = 0;
+                encode_window = 0;
+                bytes_window = 0;
+                window_start = Instant::now();
+            }
+        }
+
+        stats.set_active(false);
+        stats.set_detail("Capture/encode stopped (GPU path).");
+        true
+    }
+
+    fn run_cpu_path(
+        config: CaptureConfig,
+        video_sink: Option<VideoStreamSink>,
+        stop: Arc<AtomicBool>,
+        stats: Arc<AtomicCaptureStats>,
+    ) {
         let mut backend = match DxgiCapture::open(config.output_index) {
             Ok(b) => {
                 stats.set_detail(format!(
-                    "DXGI capture OK — {}x{}",
+                    "DXGI CPU path — {}x{}",
                     b.width, b.height
                 ));
                 b

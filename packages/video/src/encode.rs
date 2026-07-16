@@ -46,7 +46,16 @@ pub trait VideoEncoder: Send {
     fn height(&self) -> u32;
     /// Effective encode FPS after low-latency clamps (drives capture pacing).
     fn target_fps(&self) -> u32;
+    /// Prefer encode-sized NV12 from D3D11 VPP (Sunshine-class GPU path).
+    fn prefers_nv12(&self) -> bool {
+        false
+    }
     fn encode_bgra(&mut self, bgra: &[u8], pts_us: u64) -> Result<Option<EncodedFrame>, String>;
+    /// Encode tight NV12 (Y plane then interleaved UV). Default: unsupported.
+    fn encode_nv12(&mut self, nv12: &[u8], pts_us: u64) -> Result<Option<EncodedFrame>, String> {
+        let _ = (nv12, pts_us);
+        Err("encoder does not support NV12 input".into())
+    }
     fn force_keyframe(&mut self);
 }
 

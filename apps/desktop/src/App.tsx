@@ -1016,10 +1016,10 @@ export default function App() {
                 {desktopCapture?.detail ?? "Start Host to begin capture+encode."}
               </p>
               <p className="mt-1 text-[11px] text-slate-600">
-                Want Sunshine-smooth: Encoder should say{" "}
-                <span className="text-emerald-400/90">FFmpeg QSV</span> (or
-                NVENC/AMF). openh264 = CPU mush. Check Settings → Probe. After
-                Update, Stop Host → Start Host.{" "}
+                Target:{" "}
+                <span className="text-emerald-400/90">FFmpeg QSV + D3D11 VPP</span>
+                . That is the Sunshine-class GPU convert path. openh264 / CPU =
+                mush. After Update: Stop Host → Start Host.{" "}
                 <button
                   type="button"
                   className="text-cyan-400/90 underline-offset-2 hover:underline"
