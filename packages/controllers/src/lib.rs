@@ -1,7 +1,10 @@
-//! Controller subsystem (Phase 2).
+//! Controller + input subsystem.
 //!
-//! - Client: poll XInput → encode `InputPacket` → UDP to host  
-//! - Host: UDP recv → decode → **static ViGEm** Xbox 360 (Sunshine-style)
+//! **Correct product flow**
+//! - Host Start = listen only (no virtual pad)
+//! - Client Connect = sends keyboard/mouse + controller state to host
+//! - Host creates virtual Xbox 360 **only** when client has a physical controller
+//! - Game runs on host; client is the remote player
 
 mod host;
 mod packet_stats;
@@ -9,7 +12,7 @@ mod paths;
 mod physical;
 mod virtual_pad;
 
-pub use host::{run_host_input_loop, HostInputConfig, HostInputHandle};
+pub use host::{run_host_input_loop, HostInputConfig, HostInputHandle, HostPadFlags};
 pub use packet_stats::AtomicInputStats;
 pub use paths::{
     bundle_status, bundled_driver_setup, configure_vigem_search_paths, install_bundled_driver,
@@ -20,6 +23,7 @@ pub use virtual_pad::{
     create_virtual_pad, probe_vigem, NullVirtualPad, VigemStatus, VirtualPadBackend,
 };
 
+use lanplay_input::{sample_kbm_on_client, ClientKbmState};
 use lanplay_protocol::{InputPacket, FLAG_CONNECTED};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,7 +31,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// Client-side sender: poll pad + send UDP packets to host.
+/// Client-side sender: pad + keyboard/mouse → host UDP.
 pub struct ClientInputHandle {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
@@ -107,12 +111,21 @@ fn client_loop(
 
     let period = Duration::from_micros((1_000_000u64 / poll_hz.max(30) as u64).max(1));
     let mut seq: u32 = 0;
-    stats.set_detail(format!("sending controller packets to {addr}"));
+    let mut kbm_state = ClientKbmState::default();
+    stats.set_detail(format!(
+        "Sending keyboard/mouse + controller to {addr}. Plug a pad to become Player 2 on host."
+    ));
 
     while !stop.load(Ordering::Relaxed) {
-        let pad = poll_xinput(0);
         seq = seq.wrapping_add(1);
 
+        // 1) Keyboard / mouse always while connected
+        let kbm = sample_kbm_on_client(&mut kbm_state, seq);
+        let kbm_bytes = kbm.encode();
+        let _ = sock.send_to(&kbm_bytes, addr);
+
+        // 2) Controller: connected flag only if physical pad present
+        let pad = poll_xinput(0);
         let mut packet = if pad.connected {
             InputPacket {
                 controller_id: 0,
@@ -132,8 +145,7 @@ fn client_loop(
         };
         packet.stamp_now();
 
-        let bytes = packet.encode();
-        match sock.send_to(&bytes, addr) {
+        match sock.send_to(&packet.encode(), addr) {
             Ok(_) => {
                 stats.record_send(seq, pad.connected);
             }

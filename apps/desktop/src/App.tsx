@@ -231,8 +231,8 @@ export default function App() {
               LANPlay
             </h1>
             <p className="mt-1 max-w-md text-sm text-slate-400">
-              Phase 2: remote Xbox controller over Tailscale IP. Video stream
-              comes later.
+              Game runs on Host. Client sends keyboard/mouse + controller.
+              Virtual pad on Host only when Client has a controller.
             </p>
           </div>
           <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-right text-xs text-slate-400">

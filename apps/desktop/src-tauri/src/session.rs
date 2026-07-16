@@ -32,7 +32,7 @@ impl Default for SessionInner {
                 control_port,
                 media_port,
                 allow_remote_input: true,
-                message: "Host is idle. Click Start Host to listen for controller UDP.".into(),
+                message: "Host idle. Start Host to wait for a client (no virtual pad yet).".into(),
                 vigem_ok: vigem.available,
                 packets_received: 0,
                 input_latency_ms: 0.0,
@@ -44,7 +44,8 @@ impl Default for SessionInner {
                 host_ip: None,
                 control_port,
                 media_port,
-                message: "Enter the host Tailscale IP and connect to send your controller.".into(),
+                message: "Enter host Tailscale IP. Your keyboard/mouse + controller go to the host."
+                    .into(),
                 local_pad_connected: false,
                 packets_sent: 0,
                 last_seq: 0,
@@ -138,14 +139,15 @@ impl SessionManager {
 
         inner.host.vigem_ok = vigem_ok;
         inner.host.state = SessionState::Listening;
-        inner.host.virtual_pad_active = vigem_ok;
+        // Important: no virtual pad until a client controller connects
+        inner.host.virtual_pad_active = false;
         inner.host.message = if vigem_ok {
             format!(
-                "Listening for controller UDP on :{media}. {vigem_detail} Tell client your Tailscale IP."
+                "Listening on :{media}. No virtual pad yet — appears when client plugs a controller. KBM works when client connects. {vigem_detail}"
             )
         } else {
             format!(
-                "Listening on :{media} but ViGEm unavailable — packets accepted, no virtual pad. {vigem_detail}"
+                "Listening on :{media}. Install gamepad support so client controllers can appear. {vigem_detail}"
             )
         };
 
@@ -163,7 +165,7 @@ impl SessionManager {
         inner.host.input_latency_ms = 0.0;
         inner.host.last_seq = 0;
         inner.host.virtual_pad_active = false;
-        inner.host.message = "Host stopped. Virtual pad removed.".into();
+        inner.host.message = "Host stopped. Any virtual pad was removed.".into();
         Ok(inner.host.clone())
     }
 
@@ -242,10 +244,12 @@ impl SessionManager {
         let pad = poll_xinput(0).connected;
         inner.client.local_pad_connected = pad;
         inner.client.message = if pad {
-            format!("Sending XInput pad → {ip}:{media_port} (250 Hz). No video yet (Phase 2).")
+            format!(
+                "Connected to {ip}:{media_port}. Sending keyboard/mouse + your controller → host (virtual pad on host)."
+            )
         } else {
             format!(
-                "Connected path to {ip}:{media_port}, but no XInput pad on user 0. Plug a controller."
+                "Connected to {ip}:{media_port}. Sending keyboard/mouse. Plug a controller to create a virtual pad on host."
             )
         };
         Ok(inner.client.clone())
@@ -269,22 +273,20 @@ impl SessionManager {
             inner.host.packets_received = s.packets();
             inner.host.last_seq = s.last_seq();
             inner.host.input_latency_ms = s.latency_ms();
-            inner.host.virtual_pad_active = h.vigem_ok() && s.pad_connected();
+            // Virtual pad only when host actually plugged one for the remote client
+            inner.host.virtual_pad_active = h.virtual_pad_active();
             let detail = s.detail();
             if !detail.is_empty() && inner.host.state == SessionState::Listening {
-                // Keep base message; append live stats lightly via message when useful.
                 if s.packets() > 0 {
                     inner.host.message = format!(
-                        "Receiving input — pkts {} · seq {} · ~{:.1} ms · {}",
+                        "{} — pkts {} · ~{:.1} ms · virtual_pad={}",
+                        detail,
                         s.packets(),
-                        s.last_seq(),
                         s.latency_ms(),
-                        if h.vigem_ok() {
-                            "ViGEm OK"
-                        } else {
-                            "no ViGEm"
-                        }
+                        if h.virtual_pad_active() { "ON" } else { "off" }
                     );
+                } else if !detail.is_empty() {
+                    inner.host.message = detail;
                 }
             }
         }
