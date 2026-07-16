@@ -9,6 +9,12 @@ target/
 **/target/
 *.exe
 !tools/**/*.exe
+# Bundled redist (downloaded by tools/fetch-vigem-redist.ps1 — keep out of git)
+apps/desktop/src-tauri/resources/vigem/*
+!apps/desktop/src-tauri/resources/vigem/.gitkeep
+!apps/desktop/src-tauri/resources/vigem/README.md
+*.dll
+!tools/**/*.dll
 
 # Logs / env
 *.log

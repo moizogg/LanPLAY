@@ -1,8 +1,10 @@
 mod session;
 mod tailscale;
+mod vigem_setup;
 
+use lanplay_controllers::VigemBundleStatus;
 use lanplay_protocol::PROTOCOL_VERSION;
-use lanplay_shared::{ClientStatus, HostStatus, TailscaleInfo};
+use lanplay_shared::{ClientStatus, ControllerStats, HostStatus, TailscaleInfo};
 use session::SessionManager;
 use tauri::State;
 
@@ -12,7 +14,7 @@ fn get_app_info() -> serde_json::Value {
         "name": "LANPlay",
         "version": env!("CARGO_PKG_VERSION"),
         "protocolVersion": PROTOCOL_VERSION,
-        "phase": 1,
+        "phase": 2,
     })
 }
 
@@ -32,6 +34,22 @@ fn get_client_status(session: State<'_, SessionManager>) -> ClientStatus {
 }
 
 #[tauri::command]
+fn get_controller_stats(session: State<'_, SessionManager>) -> ControllerStats {
+    session.controller_stats()
+}
+
+#[tauri::command]
+fn get_vigem_bundle_status() -> VigemBundleStatus {
+    vigem_setup::status()
+}
+
+#[tauri::command]
+fn install_vigem_driver() -> Result<String, String> {
+    let msg = vigem_setup::install_driver()?;
+    Ok(msg)
+}
+
+#[tauri::command]
 fn start_host(session: State<'_, SessionManager>) -> Result<HostStatus, String> {
     session.start_host()
 }
@@ -42,10 +60,7 @@ fn stop_host(session: State<'_, SessionManager>) -> Result<HostStatus, String> {
 }
 
 #[tauri::command]
-fn set_allow_remote_input(
-    session: State<'_, SessionManager>,
-    allow: bool,
-) -> HostStatus {
+fn set_allow_remote_input(session: State<'_, SessionManager>, allow: bool) -> HostStatus {
     session.set_allow_remote_input(allow)
 }
 
@@ -69,11 +84,18 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(SessionManager::new())
+        .setup(|app| {
+            vigem_setup::init_paths(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_app_info,
             get_tailscale_info,
             get_host_status,
             get_client_status,
+            get_controller_stats,
+            get_vigem_bundle_status,
+            install_vigem_driver,
             start_host,
             stop_host,
             set_allow_remote_input,

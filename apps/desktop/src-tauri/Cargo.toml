@@ -22,4 +22,5 @@ parking_lot = "0.12"
 lanplay-shared = { path = "../../../packages/shared" }
 lanplay-protocol = { path = "../../../packages/protocol" }
 lanplay-networking = { path = "../../../packages/networking" }
+lanplay-controllers = { path = "../../../packages/controllers" }
 lanplay-overlay = { path = "../../../packages/overlay" }

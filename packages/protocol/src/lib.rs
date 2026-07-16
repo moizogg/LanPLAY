@@ -1,8 +1,13 @@
 //! Wire protocol definitions for LANPlay.
-//!
-//! Phase 1 only defines versioning. Real packet codecs land in later phases.
 
-/// Protocol major.minor — bump when packets become incompatible.
+mod input_packet;
+
+pub use input_packet::{
+    InputPacket, DecodeError, FLAG_CONNECTED, INPUT_PACKET_MAGIC, INPUT_PACKET_SIZE,
+    INPUT_PACKET_VERSION,
+};
+
+/// Protocol major — bump when packets become incompatible.
 pub const PROTOCOL_VERSION: u16 = 1;
 
 /// Human-readable protocol label for handshake logs.

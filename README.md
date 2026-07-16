@@ -2,11 +2,11 @@
 
 Low-latency desktop streaming over Tailscale — games, remote desktop, movies.
 
-**Phase 1 (current):** desktop shell only  
-- Host / Client modes  
-- Detect + copy Tailscale IP  
-- Start Host / Connect by IP stubs  
-- No real stream yet  
+**Phase 2 (current):** remote Xbox 360 controller over Tailscale IP  
+- Host / Client modes + Tailscale IP connect  
+- Client: XInput → UDP packets  
+- Host: UDP → ViGEm virtual Xbox 360 (Sunshine-style)  
+- No video/audio stream yet  
 
 See [`docs/architecture/LANPlay-Full-Plan.md`](docs/architecture/LANPlay-Full-Plan.md) for the full roadmap.
 
@@ -56,7 +56,26 @@ This opens the LANPlay window. You can:
 | **Host** | See Tailscale IP, **Start Host** / **Stop Host**, allow remote input toggle |
 | **Client** | Enter host IP (`100.x.y.z`), **Connect** / **Disconnect**, recent IPs |
 
-Phase 1 uses a **stub transport** — Connect succeeds without a real network session so the UI can be tested.
+Phase 2 opens a **real UDP controller path** on port `47801`.
+
+### Virtual gamepad (no separate GitHub downloads)
+
+LANPlay **bundles** ViGEm:
+
+| Piece | User experience |
+|-------|-----------------|
+| `ViGEmClient.dll` | Ships inside the app — loaded automatically |
+| ViGEmBus **driver** | Ships inside the app — Host UI **Install gamepad support** (one-time UAC) |
+
+Windows does not allow a normal app to load a kernel driver with zero install. We hide that: **one button inside LANPlay**, users never visit GitHub.
+
+CI runs `tools/fetch-vigem-redist.ps1` so release builds include both files.
+
+### Quick controller test
+
+1. Host: if prompted, **Install gamepad support** once → **Start Host** → copy Tailscale IP  
+2. Client: paste IP → **Connect** → plug Xbox/XInput pad  
+3. Host: Game Controllers panel or any game should see an extra Xbox 360 pad
 
 ---
 
@@ -92,10 +111,10 @@ npm install
 npm run tauri build
 ```
 
-Outputs (typical):
+Outputs (typical for this monorepo — workspace `target/` at **repo root**):
 
-- `apps/desktop/src-tauri/target/release/lanplay.exe`
-- `apps/desktop/src-tauri/target/release/bundle/nsis/LANPlay_*_x64-setup.exe`
+- `target/release/lanplay.exe`
+- `target/release/bundle/nsis/LANPlay_*_x64-setup.exe`
 
 ---
 
@@ -122,4 +141,5 @@ cargo check --workspace
 
 ## Next phase
 
-**Phase 2 — Controllers:** client XInput → host ViGEm Xbox 360.
+**Phase 3 — Networking polish:** session handshake, better errors, disconnect detection.  
+Then video capture/encode.
