@@ -29,6 +29,11 @@ use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHR
 static MF_INIT: Once = Once::new();
 static mut MF_OK: bool = false;
 
+/// Map windows `Error` → String for `?` in this module.
+fn me(e: windows::core::Error) -> String {
+    e.to_string()
+}
+
 fn ensure_mf() -> Result<(), String> {
     MF_INIT.call_once(|| unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -129,6 +134,9 @@ pub struct MfHardwareH264Encoder {
     name: String,
 }
 
+// IMFTransform is a COM pointer used only from the capture/encode thread.
+unsafe impl Send for MfHardwareH264Encoder {}
+
 impl MfHardwareH264Encoder {
     pub fn new(settings: EncoderSettings) -> Result<Self, String> {
         ensure_mf()?;
@@ -149,26 +157,48 @@ impl MfHardwareH264Encoder {
 
         unsafe {
             // --- Output H.264 ---
-            let out_ty = MFCreateMediaType().map_err(|e| e.to_string())?;
-            out_ty.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            out_ty.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
-            out_ty.SetUINT64(&MF_MT_FRAME_SIZE, pack_frame_size(w, h))?;
-            out_ty.SetUINT64(&MF_MT_FRAME_RATE, pack_frame_rate(fps, 1))?;
-            out_ty.SetUINT32(&MF_MT_AVG_BITRATE, bitrate)?;
-            out_ty.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-            out_ty.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 0)?;
+            let out_ty = MFCreateMediaType().map_err(me)?;
+            out_ty
+                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                .map_err(me)?;
+            out_ty
+                .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)
+                .map_err(me)?;
+            out_ty
+                .SetUINT64(&MF_MT_FRAME_SIZE, pack_frame_size(w, h))
+                .map_err(me)?;
+            out_ty
+                .SetUINT64(&MF_MT_FRAME_RATE, pack_frame_rate(fps, 1))
+                .map_err(me)?;
+            out_ty.SetUINT32(&MF_MT_AVG_BITRATE, bitrate).map_err(me)?;
+            out_ty
+                .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+                .map_err(me)?;
+            out_ty
+                .SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 0)
+                .map_err(me)?;
             transform
                 .SetOutputType(0, &out_ty, 0)
                 .map_err(|e| format!("SetOutputType: {e}"))?;
 
             // --- Input NV12 ---
-            let in_ty = MFCreateMediaType().map_err(|e| e.to_string())?;
-            in_ty.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            in_ty.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
-            in_ty.SetUINT64(&MF_MT_FRAME_SIZE, pack_frame_size(w, h))?;
-            in_ty.SetUINT64(&MF_MT_FRAME_RATE, pack_frame_rate(fps, 1))?;
-            in_ty.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-            in_ty.SetUINT32(&MF_MT_DEFAULT_STRIDE, w)?;
+            let in_ty = MFCreateMediaType().map_err(me)?;
+            in_ty
+                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                .map_err(me)?;
+            in_ty
+                .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
+                .map_err(me)?;
+            in_ty
+                .SetUINT64(&MF_MT_FRAME_SIZE, pack_frame_size(w, h))
+                .map_err(me)?;
+            in_ty
+                .SetUINT64(&MF_MT_FRAME_RATE, pack_frame_rate(fps, 1))
+                .map_err(me)?;
+            in_ty
+                .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+                .map_err(me)?;
+            in_ty.SetUINT32(&MF_MT_DEFAULT_STRIDE, w).map_err(me)?;
             transform
                 .SetInputType(0, &in_ty, 0)
                 .map_err(|e| format!("SetInputType NV12: {e}"))?;
@@ -181,8 +211,12 @@ impl MfHardwareH264Encoder {
                 codec_set_u32(&api, &guid_rc_mode(), 1);
             }
 
-            transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
-            transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
+            transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
+                .map_err(me)?;
+            transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+                .map_err(me)?;
         }
 
         Ok(Self {
@@ -199,10 +233,10 @@ impl MfHardwareH264Encoder {
         let mut keyframe = false;
 
         loop {
-            let mut info = MFT_OUTPUT_STREAM_INFO::default();
-            self.transform
-                .GetOutputStreamInfo(0, &mut info)
-                .map_err(|e| e.to_string())?;
+            let info = self
+                .transform
+                .GetOutputStreamInfo(0)
+                .map_err(me)?;
             let out_size = info.cbSize.max(4096);
             let out_buf = MFCreateMemoryBuffer(out_size).map_err(|e| e.to_string())?;
             let out_sample = MFCreateSample().map_err(|e| e.to_string())?;
