@@ -1,6 +1,7 @@
 //! Moonlight-style native stream window (low-latency present).
 //!
 //! Decoded RGBA is drawn here immediately — no JPEG / React poll on the hot path.
+//! Local cursor is suppressed on this window (host cursor lives in the video).
 
 #[cfg(windows)]
 mod win {
@@ -11,6 +12,7 @@ mod win {
         width: usize,
         height: usize,
         buf: Vec<u32>,
+        cursor_hidden: bool,
     }
 
     impl StreamWindow {
@@ -18,7 +20,7 @@ mod win {
             let w = width.max(16) as usize;
             let h = height.max(16) as usize;
             let mut window = Window::new(
-                "LANPlay Stream — click here to control · Ctrl+Shift+Alt+Z release",
+                "LANPlay Stream — host cursor only · Ctrl+Shift+Alt+Z release",
                 w,
                 h,
                 WindowOptions {
@@ -30,12 +32,28 @@ mod win {
             )
             .map_err(|e| format!("stream window: {e}"))?;
             window.set_target_fps(0); // present ASAP
-            Ok(Self {
+            window.set_cursor_visibility(false);
+            let mut s = Self {
                 window,
                 width: w,
                 height: h,
                 buf: vec![0u32; w * h],
-            })
+                cursor_hidden: false,
+            };
+            s.apply_cursor_hide();
+            Ok(s)
+        }
+
+        fn apply_cursor_hide(&mut self) {
+            self.window.set_cursor_visibility(false);
+            // Also wipe Win32 class cursor + show-count (Moonlight SDL_DISABLE equivalent).
+            let hwnd = self.window.get_window_handle() as isize;
+            #[cfg(windows)]
+            {
+                // Best-effort; lanplay-input also hides globally while capture is ON.
+                hide_hwnd_cursor(hwnd);
+            }
+            self.cursor_hidden = true;
         }
 
         pub fn is_open(&self) -> bool {
@@ -50,14 +68,13 @@ mod win {
                 return Ok(());
             }
             if w != self.width || h != self.height {
-                // Recreate window at new size
                 *self = Self::open(width, height)?;
             }
+            self.apply_cursor_hide();
             for i in 0..(w * h) {
                 let r = rgba[i * 4] as u32;
                 let g = rgba[i * 4 + 1] as u32;
                 let b = rgba[i * 4 + 2] as u32;
-                // minifb 0RGB
                 self.buf[i] = (r << 16) | (g << 8) | b;
             }
             self.window
@@ -67,8 +84,27 @@ mod win {
         }
 
         pub fn pump(&mut self) {
-            // Keep OS events flowing even without a new frame.
-            let _ = self.window.update_with_buffer(&self.buf, self.width, self.height);
+            self.apply_cursor_hide();
+            let _ = self
+                .window
+                .update_with_buffer(&self.buf, self.width, self.height);
+        }
+    }
+
+    fn hide_hwnd_cursor(hwnd: isize) {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetClassLongPtrW, SetCursor, ShowCursor, GCLP_HCURSOR,
+        };
+        if hwnd == 0 {
+            return;
+        }
+        unsafe {
+            let h = HWND(hwnd as *mut _);
+            let _ = SetClassLongPtrW(h, GCLP_HCURSOR, 0);
+            use windows::Win32::UI::WindowsAndMessaging::HCURSOR;
+            let _ = SetCursor(HCURSOR(std::ptr::null_mut()));
+            while ShowCursor(false) >= 0 {}
         }
     }
 }

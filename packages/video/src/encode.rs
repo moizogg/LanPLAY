@@ -79,11 +79,13 @@ impl OpenH264Encoder {
 
         let api = OpenH264API::from_source();
         // openh264 0.6: resolution is taken from the first YUV frame on encode.
+        // Higher bitrate floor + no frame skip → much less “144p mush” on screen content.
         let cfg = EncoderConfig::new()
             .max_frame_rate(settings.fps.max(1) as f32)
-            .set_bitrate_bps(settings.bitrate_bps.max(100_000))
+            .set_bitrate_bps(settings.bitrate_bps.max(2_000_000))
             .usage_type(UsageType::ScreenContentRealTime)
-            .enable_skip_frame(false);
+            .enable_skip_frame(false)
+            .set_multiple_thread_idc(0); // auto threads
 
         let encoder = Encoder::with_api_config(api, cfg)
             .map_err(|e| format!("OpenH264 init failed: {e:?}"))?;
@@ -169,21 +171,46 @@ impl VideoEncoder for OpenH264Encoder {
     }
 }
 
-/// Nearest-neighbor scale BGRA → even destination size.
+/// Bilinear scale BGRA → even destination (much sharper than nearest-neighbor).
 pub fn scale_bgra_nn(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
+    // Keep name for call sites; implementation is bilinear.
+    scale_bgra_bilinear(src, src_w, src_h, dst_w, dst_h)
+}
+
+/// Bilinear scale BGRA8 tightly packed → even destination size.
+pub fn scale_bgra_bilinear(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
     let dst_w = dst_w.max(2) & !1;
     let dst_h = dst_h.max(2) & !1;
     let mut out = vec![0u8; (dst_w * dst_h * 4) as usize];
     if src_w == 0 || src_h == 0 || src.len() < (src_w * src_h * 4) as usize {
         return out;
     }
+    if src_w == dst_w && src_h == dst_h {
+        out.copy_from_slice(&src[..out.len().min(src.len())]);
+        return out;
+    }
+    let x_ratio = (src_w.saturating_sub(1)) as f32 / dst_w.max(1) as f32;
+    let y_ratio = (src_h.saturating_sub(1)) as f32 / dst_h.max(1) as f32;
     for y in 0..dst_h {
-        let sy = (y as u64 * src_h as u64 / dst_h as u64) as u32;
+        let fy = y as f32 * y_ratio;
+        let y0 = fy as u32;
+        let y1 = (y0 + 1).min(src_h - 1);
+        let wy = fy - y0 as f32;
         for x in 0..dst_w {
-            let sx = (x as u64 * src_w as u64 / dst_w as u64) as u32;
-            let si = ((sy * src_w + sx) * 4) as usize;
+            let fx = x as f32 * x_ratio;
+            let x0 = fx as u32;
+            let x1 = (x0 + 1).min(src_w - 1);
+            let wx = fx - x0 as f32;
             let di = ((y * dst_w + x) * 4) as usize;
-            out[di..di + 4].copy_from_slice(&src[si..si + 4]);
+            for c in 0..4 {
+                let i00 = ((y0 * src_w + x0) * 4 + c) as usize;
+                let i10 = ((y0 * src_w + x1) * 4 + c) as usize;
+                let i01 = ((y1 * src_w + x0) * 4 + c) as usize;
+                let i11 = ((y1 * src_w + x1) * 4 + c) as usize;
+                let top = src[i00] as f32 * (1.0 - wx) + src[i10] as f32 * wx;
+                let bot = src[i01] as f32 * (1.0 - wx) + src[i11] as f32 * wx;
+                out[di + c] = (top * (1.0 - wy) + bot * wy).round().clamp(0.0, 255.0) as u8;
+            }
         }
     }
     out

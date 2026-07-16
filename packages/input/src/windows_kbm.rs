@@ -79,6 +79,9 @@ pub fn sample_kbm_on_client(
         return empty_packet(seq);
     }
 
+    // Moonlight: keep local cursor suppressed every tick while capturing.
+    relative_mouse::maintain_capture_cursor();
+
     // Do not forward the ungrab combo itself (Ctrl+Shift+Alt+Z)
     if capture::ungrab_hotkey_pressed() {
         let _ = wheel_hook::take_wheel_notches();

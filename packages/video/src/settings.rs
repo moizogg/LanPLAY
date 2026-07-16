@@ -38,12 +38,13 @@ impl Default for VideoSettings {
     fn default() -> Self {
         Self {
             output_index: 0,
+            // Prefer sharp 1080p-class software encode (CPU heavier; use Settings to lower).
             fps: 30,
-            bitrate_kbps: 12_000,
+            bitrate_kbps: 20_000,
             resolution_mode: ResolutionMode::Auto,
-            max_edge: 1280,
-            width: 1280,
-            height: 720,
+            max_edge: 1920,
+            width: 1920,
+            height: 1080,
             encoder: "openh264".into(),
         }
     }
@@ -146,6 +147,14 @@ pub struct ResolutionPreset {
 pub fn resolution_presets() -> Vec<ResolutionPreset> {
     vec![
         ResolutionPreset {
+            id: "auto-1920".into(),
+            label: "Auto (max edge 1920) — sharp default".into(),
+            mode: ResolutionMode::Auto,
+            width: 1920,
+            height: 1080,
+            max_edge: 1920,
+        },
+        ResolutionPreset {
             id: "auto-1280".into(),
             label: "Auto (max edge 1280)".into(),
             mode: ResolutionMode::Auto,
@@ -170,14 +179,6 @@ pub fn resolution_presets() -> Vec<ResolutionPreset> {
             max_edge: 1280,
         },
         ResolutionPreset {
-            id: "900p".into(),
-            label: "1600×900".into(),
-            mode: ResolutionMode::Fixed,
-            width: 1600,
-            height: 900,
-            max_edge: 1600,
-        },
-        ResolutionPreset {
             id: "1080p".into(),
             label: "1920×1080".into(),
             mode: ResolutionMode::Fixed,
@@ -189,9 +190,9 @@ pub fn resolution_presets() -> Vec<ResolutionPreset> {
             id: "custom".into(),
             label: "Custom…".into(),
             mode: ResolutionMode::Fixed,
-            width: 1280,
-            height: 720,
-            max_edge: 1280,
+            width: 1920,
+            height: 1080,
+            max_edge: 1920,
         },
     ]
 }

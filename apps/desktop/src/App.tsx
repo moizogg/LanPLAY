@@ -19,11 +19,11 @@ import type {
 const DEFAULT_VIDEO: VideoSettings = {
   outputIndex: 0,
   fps: 30,
-  bitrateKbps: 8000,
+  bitrateKbps: 20000,
   resolutionMode: "auto",
-  maxEdge: 1280,
-  width: 1280,
-  height: 720,
+  maxEdge: 1920,
+  width: 1920,
+  height: 1080,
   encoder: "openh264",
 };
 
@@ -466,9 +466,11 @@ export default function App() {
                   className="mt-1 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-sm text-white"
                   value={
                     videoSettings.resolutionMode === "auto"
-                      ? videoSettings.maxEdge <= 960
-                        ? "auto-960"
-                        : "auto-1280"
+                      ? videoSettings.maxEdge >= 1920
+                        ? "auto-1920"
+                        : videoSettings.maxEdge <= 960
+                          ? "auto-960"
+                          : "auto-1280"
                       : resPresets.find(
                           (p) =>
                             p.mode === "fixed" &&
@@ -559,8 +561,8 @@ export default function App() {
                 )}
               </div>
               <p className="text-[11px] text-slate-600">
-                Software encode: try 960 max edge or 30 FPS if encode ms is high.
-                Hardware NVENC/AMF/QSV will use these same knobs later.
+                Default is sharp 1080p-class @ 20 Mbps. If CPU melts, drop to
+                auto-1280 or 30 FPS. Stream window shows full encode res.
               </p>
             </div>
 

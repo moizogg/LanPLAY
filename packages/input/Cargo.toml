@@ -21,3 +21,4 @@ windows = { version = "0.58", features = [
   "Win32_Storage_FileSystem",
   "Win32_Security",
 ] }
+# GCLP_HCURSOR / SetClassLongPtr for stream-window null cursor
