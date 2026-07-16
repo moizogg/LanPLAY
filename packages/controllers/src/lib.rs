@@ -1,8 +1,4 @@
-//! Controller + input subsystem.
-//!
-//! - KBM only while LANPlay is focused on the client
-//! - Virtual pad on host is debounced (no random disconnects)
-//! - Best-effort exclusive pad hold so client games use the pad less
+//! Controller + input subsystem (Moonlight-style client capture).
 
 mod host;
 mod packet_stats;
@@ -21,13 +17,16 @@ pub use virtual_pad::{
     create_virtual_pad, probe_vigem, NullVirtualPad, VigemStatus, VirtualPadBackend,
 };
 
-use lanplay_input::{sample_kbm_on_client, ClientKbmState, ExclusivePadGuard};
+pub use lanplay_input::{CaptureState, CaptureStatus};
+use lanplay_input::{
+    sample_kbm_on_client, ungrab_hotkey_pressed, ClientKbmState, ExclusivePadGuard,
+};
 use lanplay_protocol::{InputPacket, FLAG_CONNECTED};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Client-side sender: pad + keyboard/mouse → host UDP.
 pub struct ClientInputHandle {
@@ -35,6 +34,7 @@ pub struct ClientInputHandle {
     join: Option<JoinHandle<()>>,
     stats: Arc<AtomicInputStats>,
     session_alive: Arc<AtomicBool>,
+    capture: CaptureState,
 }
 
 impl ClientInputHandle {
@@ -46,7 +46,16 @@ impl ClientInputHandle {
         self.session_alive.load(Ordering::Relaxed) && !self.stop.load(Ordering::Relaxed)
     }
 
+    pub fn capture(&self) -> CaptureState {
+        self.capture.clone()
+    }
+
+    pub fn set_capture(&self, on: bool) {
+        self.capture.set_active(on);
+    }
+
     pub fn stop(mut self) {
+        self.capture.set_active(false);
         self.stop.store(true, Ordering::SeqCst);
         self.session_alive.store(false, Ordering::SeqCst);
         if let Some(j) = self.join.take() {
@@ -57,6 +66,7 @@ impl ClientInputHandle {
 
 impl Drop for ClientInputHandle {
     fn drop(&mut self) {
+        self.capture.set_active(false);
         self.stop.store(true, Ordering::SeqCst);
         self.session_alive.store(false, Ordering::SeqCst);
         if let Some(j) = self.join.take() {
@@ -65,7 +75,8 @@ impl Drop for ClientInputHandle {
     }
 }
 
-/// Spawn client input thread. Stops when `session_alive` goes false (host stopped).
+/// Spawn client input thread.
+/// Auto-enables capture when session starts (Moonlight starts captured for stream).
 pub fn run_client_input_loop(
     host_ip: String,
     media_port: u16,
@@ -74,14 +85,19 @@ pub fn run_client_input_loop(
 ) -> lanplay_shared::Result<ClientInputHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(AtomicInputStats::default());
+    // Start with capture ON after join (like Moonlight entering a stream)
+    let capture = CaptureState::new(true);
+    capture.set_active(true);
+
     let stop_t = Arc::clone(&stop);
     let stats_t = Arc::clone(&stats);
     let alive_t = Arc::clone(&session_alive);
+    let capture_t = capture.clone();
 
     let join = thread::Builder::new()
         .name("lanplay-client-input".into())
         .spawn(move || {
-            client_loop(host_ip, media_port, poll_hz, stop_t, alive_t, stats_t);
+            client_loop(host_ip, media_port, poll_hz, stop_t, alive_t, stats_t, capture_t);
         })
         .map_err(|e| lanplay_shared::LanPlayError::Message(e.to_string()))?;
 
@@ -90,6 +106,7 @@ pub fn run_client_input_loop(
         join: Some(join),
         stats,
         session_alive,
+        capture,
     })
 }
 
@@ -100,6 +117,7 @@ fn client_loop(
     stop: Arc<AtomicBool>,
     session_alive: Arc<AtomicBool>,
     stats: Arc<AtomicInputStats>,
+    capture: CaptureState,
 ) {
     let addr: SocketAddr = match format!("{host_ip}:{media_port}").parse() {
         Ok(a) => a,
@@ -118,7 +136,6 @@ fn client_loop(
     };
     let _ = sock.set_write_timeout(Some(Duration::from_millis(50)));
 
-    // Hold physical pads exclusive so client games see them less (best-effort).
     let exclusive = ExclusivePadGuard::acquire();
     let exclusive_n = exclusive.count();
 
@@ -129,19 +146,35 @@ fn client_loop(
     let mut pad_lost_streak: u32 = 0;
     let mut pad_active = false;
     let mut last_good = PhysicalPadState::default();
+    let mut ungrab_armed = true;
+    let mut last_detail = Instant::now();
 
     stats.set_detail(format!(
-        "Live → {addr}. KBM only when LANPlay focused. Exclusive HID holds: {exclusive_n}. Pad muted locally best-effort."
+        "Live → {addr}. Capture ON (Ctrl+Shift+Alt+Z to release). HID holds: {exclusive_n}."
     ));
 
     while !stop.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
         seq = seq.wrapping_add(1);
 
-        // KBM: empty when unfocused → host gets key-up / no mouse (handled in sample)
-        let kbm = sample_kbm_on_client(&mut kbm_state, seq);
+        // Moonlight-style ungrab hotkey
+        if ungrab_hotkey_pressed() {
+            if ungrab_armed && capture.is_active() {
+                capture.set_active(false);
+                // Force one empty packet path for raise-all-keys
+                ungrab_armed = false;
+                stats.set_detail(
+                    "Capture OFF — local desktop free. Click Capture to control host again.",
+                );
+            }
+        } else {
+            ungrab_armed = true;
+        }
+
+        let capt = capture.is_active();
+        let kbm = sample_kbm_on_client(&mut kbm_state, seq, capt);
         let _ = sock.send_to(&kbm.encode(), addr);
 
-        // Prefer first connected physical XInput slot (0..3)
+        // Gamepad always sent (like Moonlight background gamepad optional — we always send pad)
         let sample = poll_first_connected_pad();
         if sample.connected {
             pad_seen_streak = pad_seen_streak.saturating_add(1);
@@ -149,19 +182,21 @@ fn client_loop(
             last_good = sample;
             if !pad_active && pad_seen_streak >= 8 {
                 pad_active = true;
+                if last_detail.elapsed() > Duration::from_secs(1) {
+                    stats.set_detail("Controller active → host virtual pad.");
+                    last_detail = Instant::now();
+                }
             }
         } else {
             pad_lost_streak = pad_lost_streak.saturating_add(1);
             pad_seen_streak = 0;
-            // ~1s of continuous disconnect at 250Hz before we drop pad_active
             if pad_active && pad_lost_streak >= 250 {
                 pad_active = false;
                 last_good = PhysicalPadState::default();
+                stats.set_detail("Controller disconnected locally.");
             }
         }
 
-        // While pad_active, keep sending CONNECTED even on brief XInput glitches
-        // (use last_good state) so host does not randomly unplug.
         let mut packet = if pad_active {
             InputPacket {
                 controller_id: 0,
@@ -193,9 +228,9 @@ fn client_loop(
         thread::sleep(period);
     }
 
-    // Drop exclusive holds → pad available again on client
+    capture.set_active(false);
     drop(exclusive);
-    stats.set_detail("Client input stopped (session ended). Pad released locally.");
+    stats.set_detail("Client input stopped. Capture released.");
     session_alive.store(false, Ordering::SeqCst);
 }
 

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
   AppMode,
+  CaptureStatus,
   ClientStatus,
   ControllerStats,
   HostStatus,
@@ -55,6 +56,7 @@ export default function App() {
   const [vigemBundle, setVigemBundle] = useState<VigemBundleStatus | null>(
     null,
   );
+  const [capture, setCapture] = useState<CaptureStatus | null>(null);
   const [hostIp, setHostIp] = useState("");
   const [controlPort, setControlPort] = useState(47800);
   const [mediaPort, setMediaPort] = useState(47801);
@@ -66,14 +68,16 @@ export default function App() {
   /** Session/controller metrics only — safe to poll often (no external CLI). */
   const refreshLive = useCallback(async () => {
     try {
-      const [h, c, st] = await Promise.all([
+      const [h, c, st, cap] = await Promise.all([
         invoke<HostStatus>("get_host_status"),
         invoke<ClientStatus>("get_client_status"),
         invoke<ControllerStats>("get_controller_stats"),
+        invoke<CaptureStatus>("get_input_capture"),
       ]);
       setHost(h);
       setClient(c);
       setStats(st);
+      setCapture(cap);
       setControlPort(h.controlPort);
       setMediaPort(h.mediaPort);
     } catch (e) {
@@ -195,6 +199,28 @@ export default function App() {
       setTimeout(() => setCopied(false), 1500);
     } catch {
       setError("Could not copy IP to clipboard.");
+    }
+  }
+
+  async function onToggleCapture() {
+    setError(null);
+    try {
+      const status = await invoke<CaptureStatus>("toggle_input_capture");
+      setCapture(status);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function onSetCapture(active: boolean) {
+    setError(null);
+    try {
+      const status = await invoke<CaptureStatus>("set_input_capture", {
+        active,
+      });
+      setCapture(status);
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -565,6 +591,59 @@ export default function App() {
               <p className="rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
                 Waiting for the host to Accept or Reject your join request…
               </p>
+            )}
+
+            {client?.state === "streaming" && (
+              <div
+                className={`rounded-xl border p-4 ${
+                  capture?.active
+                    ? "border-emerald-400/40 bg-emerald-500/10"
+                    : "border-white/15 bg-black/30"
+                }`}
+              >
+                <p className="text-sm font-semibold text-white">
+                  Input capture{" "}
+                  {capture?.active ? (
+                    <span className="text-emerald-300">ON</span>
+                  ) : (
+                    <span className="text-slate-400">OFF</span>
+                  )}
+                </p>
+                <p className="mt-1 text-xs text-slate-400">
+                  {capture?.hint ??
+                    "Moonlight-style: capture sends mouse/keyboard to host."}
+                </p>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Hotkey: Ctrl+Shift+Alt+Z = release capture · Click Capture to
+                  control host again
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {capture?.active ? (
+                    <button
+                      type="button"
+                      onClick={() => void onSetCapture(false)}
+                      className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-amber-400"
+                    >
+                      Release capture
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => void onSetCapture(true)}
+                      className="rounded-lg bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-400"
+                    >
+                      Capture input
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void onToggleCapture()}
+                    className="rounded-lg border border-white/15 bg-white/5 px-4 py-2 text-sm text-slate-200 hover:bg-white/10"
+                  >
+                    Toggle
+                  </button>
+                </div>
+              </div>
             )}
 
             <div className="flex flex-wrap gap-3">

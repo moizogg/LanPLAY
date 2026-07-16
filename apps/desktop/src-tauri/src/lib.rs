@@ -2,7 +2,7 @@ mod session;
 mod tailscale;
 mod vigem_setup;
 
-use lanplay_controllers::VigemBundleStatus;
+use lanplay_controllers::{CaptureStatus, VigemBundleStatus};
 use lanplay_protocol::PROTOCOL_VERSION;
 use lanplay_shared::{ClientStatus, ControllerStats, HostStatus, TailscaleInfo};
 use session::SessionManager;
@@ -88,6 +88,24 @@ fn disconnect_client(session: State<'_, SessionManager>) -> Result<ClientStatus,
     session.disconnect_client()
 }
 
+#[tauri::command]
+fn get_input_capture(session: State<'_, SessionManager>) -> CaptureStatus {
+    session.get_input_capture()
+}
+
+#[tauri::command]
+fn set_input_capture(
+    session: State<'_, SessionManager>,
+    active: bool,
+) -> Result<CaptureStatus, String> {
+    session.set_input_capture(active)
+}
+
+#[tauri::command]
+fn toggle_input_capture(session: State<'_, SessionManager>) -> Result<CaptureStatus, String> {
+    session.toggle_input_capture()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -111,6 +129,9 @@ pub fn run() {
             set_allow_remote_input,
             connect_client,
             disconnect_client,
+            get_input_capture,
+            set_input_capture,
+            toggle_input_capture,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LANPlay");

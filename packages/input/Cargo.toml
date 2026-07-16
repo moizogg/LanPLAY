@@ -8,6 +8,7 @@ description = "Keyboard/mouse capture (client) and host injection"
 [dependencies]
 lanplay-shared = { path = "../shared" }
 lanplay-protocol = { path = "../protocol" }
+serde = { workspace = true, features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

@@ -1,8 +1,10 @@
-//! Windows client sampling + host injection via SendInput.
+//! Windows client sampling + host injection (Moonlight-inspired).
 //!
-//! Client only captures keyboard/mouse when a LANPlay window is foreground
-//! (so you can use other apps on the client without controlling the host).
+//! - Capture OFF → empty KBM (host gets key-ups via apply edge logic)
+//! - Capture ON + focused → relative mouse + keys
+//! - Capture ON but unfocused → empty (safety)
 
+use crate::capture::{self, relative_mouse};
 use lanplay_protocol::{
     KbmPacket, KBM_FLAG_LBUTTON, KBM_FLAG_MBUTTON, KBM_FLAG_RBUTTON,
 };
@@ -18,14 +20,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
 };
 
-/// Tracks client cursor + previous key snapshot for deltas.
+/// Tracks client cursor when not in relative mode.
 #[derive(Default)]
 pub struct ClientKbmState {
     last_x: i32,
     last_y: i32,
     has_pos: bool,
-    /// Last focus state — reset mouse baseline when regaining focus.
-    was_focused: bool,
 }
 
 /// Tracks which keys host thinks are down so we can emit KEYUP.
@@ -49,33 +49,37 @@ pub fn is_lanplay_focused() -> bool {
     }
 }
 
-/// Sample mouse delta + held keys on the client PC.
-/// When LANPlay is **not** focused, returns an empty packet (and resets mouse baseline).
-pub fn sample_kbm_on_client(state: &mut ClientKbmState, seq: u32) -> KbmPacket {
-    let focused = is_lanplay_focused();
+fn empty_packet(seq: u32) -> KbmPacket {
+    let mut packet = KbmPacket {
+        flags: 0,
+        seq,
+        client_ts_us: 0,
+        mouse_dx: 0,
+        mouse_dy: 0,
+        wheel: 0,
+        keys: [0; 8],
+        key_count: 0,
+    };
+    packet.stamp_now();
+    packet
+}
 
-    if !focused {
-        // Avoid a huge mouse jump when user returns to the app
+/// Sample mouse + keys.
+/// `capture_active`: Moonlight-style capture flag (must be true to send real input).
+pub fn sample_kbm_on_client(
+    state: &mut ClientKbmState,
+    seq: u32,
+    capture_active: bool,
+) -> KbmPacket {
+    // Not capturing or not focused → empty packet (raises keys on host)
+    if !capture_active || !is_lanplay_focused() {
         state.has_pos = false;
-        state.was_focused = false;
-        let mut packet = KbmPacket {
-            flags: 0,
-            seq,
-            client_ts_us: 0,
-            mouse_dx: 0,
-            mouse_dy: 0,
-            wheel: 0,
-            keys: [0; 8],
-            key_count: 0,
-        };
-        packet.stamp_now();
-        return packet;
+        return empty_packet(seq);
     }
 
-    if !state.was_focused {
-        // Just focused — re-baseline cursor, don't send a huge delta
-        state.has_pos = false;
-        state.was_focused = true;
+    // Do not forward the ungrab combo itself (Ctrl+Shift+Alt+Z)
+    if capture::ungrab_hotkey_pressed() {
+        return empty_packet(seq);
     }
 
     let mut flags = 0u8;
@@ -89,7 +93,11 @@ pub fn sample_kbm_on_client(state: &mut ClientKbmState, seq: u32) -> KbmPacket {
         flags |= KBM_FLAG_MBUTTON;
     }
 
-    let (dx, dy) = mouse_delta(state);
+    let (dx, dy) = if relative_mouse::is_relative() {
+        relative_mouse::sample_relative_delta()
+    } else {
+        mouse_delta_absolute(state)
+    };
 
     let mut keys = [0u8; 8];
     let mut key_count = 0u8;
@@ -97,6 +105,7 @@ pub fn sample_kbm_on_client(state: &mut ClientKbmState, seq: u32) -> KbmPacket {
         if vk == VK_LBUTTON.0 as u8 || vk == VK_RBUTTON.0 as u8 || vk == VK_MBUTTON.0 as u8 {
             continue;
         }
+        // Skip modifiers used in ungrab combo while held with Z path already empty
         if async_down(i32::from(vk)) {
             if (key_count as usize) < 8 {
                 keys[key_count as usize] = vk;
@@ -119,7 +128,7 @@ pub fn sample_kbm_on_client(state: &mut ClientKbmState, seq: u32) -> KbmPacket {
     packet
 }
 
-/// Apply remote KBM on the host desktop.
+/// Apply remote KBM on the host desktop (edge-triggered keys → raise-all when empty).
 pub fn apply_kbm_on_host(state: &mut HostKbmState, packet: &KbmPacket) {
     if packet.mouse_dx != 0 || packet.mouse_dy != 0 {
         send_mouse_move(packet.mouse_dx as i32, packet.mouse_dy as i32);
@@ -144,6 +153,7 @@ pub fn apply_kbm_on_host(state: &mut HostKbmState, packet: &KbmPacket) {
     let new_keys = &packet.keys[..packet.key_count.min(8) as usize];
     let old_keys = &state.keys_down[..state.key_count.min(8) as usize];
 
+    // raiseAllKeys equivalent: any key not in new set gets KEYUP
     for &vk in old_keys {
         if vk != 0 && !new_keys.contains(&vk) {
             send_key(vk, false);
@@ -163,7 +173,7 @@ fn async_down(vk: i32) -> bool {
     unsafe { GetAsyncKeyState(vk) as u16 & 0x8000 != 0 }
 }
 
-fn mouse_delta(state: &mut ClientKbmState) -> (i16, i16) {
+fn mouse_delta_absolute(state: &mut ClientKbmState) -> (i16, i16) {
     let mut pt = POINT::default();
     if unsafe { GetCursorPos(&mut pt) }.is_err() {
         return (0, 0);

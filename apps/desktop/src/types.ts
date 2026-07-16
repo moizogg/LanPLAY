@@ -70,3 +70,9 @@ export interface VigemBundleStatus {
   driverReady: boolean;
   detail: string;
 }
+
+/** Moonlight-style client input capture */
+export interface CaptureStatus {
+  active: boolean;
+  hint: string;
+}

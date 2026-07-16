@@ -1,8 +1,8 @@
 //! Session: join accept/reject + UDP input after approval + live disconnect.
 
 use lanplay_controllers::{
-    poll_xinput, probe_vigem, run_client_input_loop, run_host_input_loop, ClientInputHandle,
-    HostInputConfig, HostInputHandle,
+    poll_xinput, probe_vigem, run_client_input_loop, run_host_input_loop, CaptureStatus,
+    ClientInputHandle, HostInputConfig, HostInputHandle,
 };
 use lanplay_networking::{
     client_request_join, default_ports, local_client_name, run_host_join_listener,
@@ -364,6 +364,46 @@ impl SessionManager {
         inner.client.last_seq = 0;
         inner.client.message = "Disconnected.".into();
         Ok(inner.client.clone())
+    }
+
+    /// Moonlight-style capture toggle for client KBM.
+    pub fn set_input_capture(&self, active: bool) -> Result<CaptureStatus, String> {
+        let inner = self.inner.lock();
+        let Some(ref c) = inner.client_input else {
+            return Err("Not in a live client session.".into());
+        };
+        c.set_capture(active);
+        Ok(CaptureStatus::from_state(&c.capture()))
+    }
+
+    pub fn toggle_input_capture(&self) -> Result<CaptureStatus, String> {
+        let inner = self.inner.lock();
+        let Some(ref c) = inner.client_input else {
+            return Err("Not in a live client session.".into());
+        };
+        let on = c.capture().toggle();
+        Ok(CaptureStatus {
+            active: on,
+            hint: if on {
+                "Input capture ON — mouse/keyboard go to host. Press Ctrl+Shift+Alt+Z to release."
+                    .into()
+            } else {
+                "Input capture OFF — use this PC normally. Click Capture to control host."
+                    .into()
+            },
+        })
+    }
+
+    pub fn get_input_capture(&self) -> CaptureStatus {
+        let inner = self.inner.lock();
+        if let Some(ref c) = inner.client_input {
+            CaptureStatus::from_state(&c.capture())
+        } else {
+            CaptureStatus {
+                active: false,
+                hint: "Join a host session to enable input capture.".into(),
+            }
+        }
     }
 
     fn refresh_host_metrics(inner: &mut SessionInner) {

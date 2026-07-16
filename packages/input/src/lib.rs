@@ -1,10 +1,18 @@
-//! Keyboard + mouse: client capture → packets → host `SendInput`.
-//! Client exclusive pad hold (best-effort).
+//! Client capture + host inject (Moonlight-inspired).
+//!
+//! - Explicit **input capture** toggle (not only window focus)
+//! - Relative mouse while captured
+//! - Empty KBM on release = raise-all-keys on host
+//! - Best-effort exclusive pad hold
+
+mod capture;
 
 #[cfg(windows)]
 mod exclusive_pad;
 #[cfg(windows)]
 mod windows_kbm;
+
+pub use capture::{ungrab_hotkey_pressed, CaptureState, CaptureStatus};
 
 #[cfg(windows)]
 pub use exclusive_pad::ExclusivePadGuard;
@@ -36,7 +44,11 @@ pub mod stub {
         true
     }
 
-    pub fn sample_kbm_on_client(_state: &mut ClientKbmState, _seq: u32) -> KbmPacket {
+    pub fn sample_kbm_on_client(
+        _state: &mut ClientKbmState,
+        _seq: u32,
+        _capture_active: bool,
+    ) -> KbmPacket {
         KbmPacket {
             flags: 0,
             seq: 0,
