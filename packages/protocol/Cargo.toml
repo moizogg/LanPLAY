@@ -1,0 +1,10 @@
+[package]
+name = "lanplay-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared wire protocol definitions (packets, versions)"
+
+[dependencies]
+lanplay-shared = { path = "../shared" }
+serde = { workspace = true }

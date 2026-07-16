@@ -1,0 +1,9 @@
+[package]
+name = "lanplay-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Desktop capture, encode, decode, present (Phase 4+)"
+
+[dependencies]
+lanplay-shared = { path = "../shared" }

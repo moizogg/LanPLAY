@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+  "apps/desktop/src-tauri",
+  "packages/shared",
+  "packages/protocol",
+  "packages/networking",
+  "packages/controllers",
+  "packages/video",
+  "packages/audio",
+  "packages/input",
+  "packages/overlay",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["LANPlay"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"

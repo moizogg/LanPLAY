@@ -1,0 +1,9 @@
+[package]
+name = "lanplay-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Keyboard/mouse capture and host injection (Phase 8+)"
+
+[dependencies]
+lanplay-shared = { path = "../shared" }

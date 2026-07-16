@@ -1,0 +1,10 @@
+[package]
+name = "lanplay-networking"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Network transport trait and adapters (direct IP now, native later)"
+
+[dependencies]
+lanplay-shared = { path = "../shared" }
+lanplay-protocol = { path = "../protocol" }

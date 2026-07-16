@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build
+dist/
+**/dist/
+target/
+**/target/
+*.exe
+!tools/**/*.exe
+
+# Logs / env
+*.log
+.env
+.env.*
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Tauri / local
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/WixTools/
+
+# Misc
+*.pdb
+.cache/
