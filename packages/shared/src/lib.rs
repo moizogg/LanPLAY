@@ -3,10 +3,10 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Default control-plane TCP port (session handshake — Phase 3+).
+/// Default control-plane TCP port (join handshake / accept-reject).
 pub const DEFAULT_CONTROL_PORT: u16 = 47800;
 
-/// Default media/input UDP port (Phase 2 controller packets use this).
+/// Default media/input UDP port (controller + KBM after accept).
 pub const DEFAULT_MEDIA_PORT: u16 = 47801;
 
 /// App role selected in the UI.
@@ -23,9 +23,19 @@ pub enum AppMode {
 pub enum SessionState {
     Idle,
     Listening,
+    /// Client waiting for host Accept/Reject
+    WaitingApproval,
     Connecting,
     Streaming,
     Error,
+}
+
+/// Pending client join shown on Host UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingJoinInfo {
+    pub peer_ip: String,
+    pub client_name: String,
 }
 
 /// Host listen status returned to the UI.
@@ -37,16 +47,15 @@ pub struct HostStatus {
     pub media_port: u16,
     pub allow_remote_input: bool,
     pub message: String,
-    /// True when ViGEm bus is available on this machine.
     pub vigem_ok: bool,
-    /// Packets received on the input UDP port.
     pub packets_received: u64,
-    /// Estimated one-way controller latency (host_now - client_ts), ms.
     pub input_latency_ms: f32,
-    /// Last remote sequence number applied.
     pub last_seq: u32,
-    /// Remote pad currently plugged into ViGEm.
     pub virtual_pad_active: bool,
+    /// Someone is waiting for Accept / Reject.
+    pub pending_join: Option<PendingJoinInfo>,
+    /// Host accepted a client (UDP input allowed from them).
+    pub session_active: bool,
 }
 
 /// Client connection status returned to the UI.
@@ -58,9 +67,7 @@ pub struct ClientStatus {
     pub control_port: u16,
     pub media_port: u16,
     pub message: String,
-    /// Local XInput pad detected for user index 0.
     pub local_pad_connected: bool,
-    /// Packets sent to host.
     pub packets_sent: u64,
     pub last_seq: u32,
 }
@@ -82,7 +89,6 @@ pub struct ControllerStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TailscaleInfo {
-    /// Best-effort Tailscale IPv4 (e.g. 100.x.y.z), if found.
     pub ip: Option<String>,
     pub available: bool,
     pub detail: String,

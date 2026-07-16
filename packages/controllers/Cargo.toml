@@ -9,6 +9,7 @@ description = "XInput read + ViGEm Xbox 360 inject (Phase 2+)"
 lanplay-shared = { path = "../shared" }
 lanplay-protocol = { path = "../protocol" }
 lanplay-input = { path = "../input" }
+parking_lot = "0.12"
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 

@@ -36,6 +36,7 @@ function stateBadgeClass(state: string): string {
     case "streaming":
       return "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30";
     case "connecting":
+    case "waiting_approval":
       return "bg-amber-500/15 text-amber-200 ring-amber-500/30";
     case "error":
       return "bg-rose-500/15 text-rose-300 ring-rose-500/30";
@@ -197,6 +198,19 @@ export default function App() {
     }
   }
 
+  async function onRespondJoin(accept: boolean) {
+    setBusy(true);
+    setError(null);
+    try {
+      const status = await invoke<HostStatus>("respond_to_join", { accept });
+      setHost(status);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onInstallVigem() {
     setBusy(true);
     setError(null);
@@ -217,7 +231,9 @@ export default function App() {
   const hostListening =
     host?.state === "listening" || host?.state === "streaming";
   const clientActive =
-    client?.state === "connecting" || client?.state === "streaming";
+    client?.state === "connecting" ||
+    client?.state === "waiting_approval" ||
+    client?.state === "streaming";
 
   return (
     <div className="min-h-full bg-[radial-gradient(ellipse_at_top,_#122033_0%,_#070b12_55%)]">
@@ -405,7 +421,46 @@ export default function App() {
               </span>
             </label>
 
+            {host?.pendingJoin && (
+              <div className="rounded-xl border border-amber-400/40 bg-amber-500/10 p-4">
+                <p className="text-sm font-semibold text-amber-100">
+                  Join request
+                </p>
+                <p className="mt-1 text-sm text-amber-50/90">
+                  <span className="font-mono text-cyan-200">
+                    {host.pendingJoin.clientName}
+                  </span>{" "}
+                  (
+                  <span className="font-mono">{host.pendingJoin.peerIp}</span>)
+                  wants to connect.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void onRespondJoin(true)}
+                    className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
+                  >
+                    Accept
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void onRespondJoin(false)}
+                    className="rounded-lg bg-rose-500/90 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500 disabled:opacity-50"
+                  >
+                    Reject
+                  </button>
+                </div>
+              </div>
+            )}
+
             <p className="text-sm text-slate-400">{host?.message}</p>
+            {host?.sessionActive && (
+              <p className="text-xs text-emerald-400/90">
+                Session active with accepted client.
+              </p>
+            )}
 
             <div className="flex flex-wrap gap-3">
               {!hostListening ? (
@@ -505,6 +560,12 @@ export default function App() {
               {client?.localPadConnected ? "pad detected" : "no pad on index 0"}
             </p>
 
+            {client?.state === "waiting_approval" && (
+              <p className="rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                Waiting for the host to Accept or Reject your join request…
+              </p>
+            )}
+
             <div className="flex flex-wrap gap-3">
               {!clientActive ? (
                 <button
@@ -513,7 +574,7 @@ export default function App() {
                   onClick={() => void onConnect()}
                   className="rounded-xl bg-cyan-500 px-5 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:opacity-50"
                 >
-                  Connect
+                  Request to join
                 </button>
               ) : (
                 <button

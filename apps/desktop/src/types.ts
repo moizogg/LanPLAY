@@ -3,6 +3,7 @@ export type AppMode = "host" | "client";
 export type SessionState =
   | "idle"
   | "listening"
+  | "waiting_approval"
   | "connecting"
   | "streaming"
   | "error";
@@ -20,6 +21,11 @@ export interface TailscaleInfo {
   detail: string;
 }
 
+export interface PendingJoinInfo {
+  peerIp: string;
+  clientName: string;
+}
+
 export interface HostStatus {
   state: SessionState;
   controlPort: number;
@@ -31,6 +37,8 @@ export interface HostStatus {
   inputLatencyMs: number;
   lastSeq: number;
   virtualPadActive: boolean;
+  pendingJoin: PendingJoinInfo | null;
+  sessionActive: boolean;
 }
 
 export interface ClientStatus {

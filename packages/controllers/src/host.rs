@@ -12,6 +12,8 @@ use lanplay_protocol::{
     packet_magic, InputPacket, KbmPacket, INPUT_PACKET_MAGIC, INPUT_PACKET_SIZE, KBM_PACKET_MAGIC,
     KBM_PACKET_SIZE,
 };
+use parking_lot::Mutex;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -27,6 +29,8 @@ pub struct HostPadFlags {
 pub struct HostInputConfig {
     pub media_port: u16,
     pub allow_remote_input: bool,
+    /// Only accept UDP from this peer after host Accept. Shared with join listener.
+    pub allowed_peer: Arc<Mutex<Option<IpAddr>>>,
 }
 
 pub struct HostInputHandle {
@@ -95,11 +99,12 @@ pub fn run_host_input_loop(config: HostInputConfig) -> lanplay_shared::Result<Ho
     let flags_t = pad_flags.clone();
     let port = config.media_port;
     let allow = config.allow_remote_input;
+    let allowed_peer = config.allowed_peer;
 
     let join = thread::Builder::new()
         .name("lanplay-host-input".into())
         .spawn(move || {
-            host_loop(port, allow, stop_t, stats_t, flags_t, vigem_ok);
+            host_loop(port, allow, stop_t, stats_t, flags_t, vigem_ok, allowed_peer);
         })
         .map_err(|e| lanplay_shared::LanPlayError::Message(e.to_string()))?;
 
@@ -120,6 +125,7 @@ fn host_loop(
     stats: Arc<AtomicInputStats>,
     pad_flags: HostPadFlags,
     vigem_ok: bool,
+    allowed_peer: Arc<Mutex<Option<IpAddr>>>,
 ) {
     let bind = format!("0.0.0.0:{media_port}");
     let sock = match std::net::UdpSocket::bind(&bind) {
@@ -131,7 +137,7 @@ fn host_loop(
     };
     let _ = sock.set_read_timeout(Some(Duration::from_millis(100)));
     stats.set_detail(format!(
-        "Listening on {bind}. Virtual pad = only when client has a controller. KBM from client when connected."
+        "Listening on {bind}. Waiting for you to Accept a client join. Then KBM + pad from that client only."
     ));
 
     let mut buf = [0u8; 256];
@@ -168,7 +174,15 @@ fn host_loop(
         }
 
         match sock.recv_from(&mut buf) {
-            Ok((n, _from)) if n >= 4 => {
+            Ok((n, from)) if n >= 4 => {
+                // Ignore UDP until host Accepted this peer
+                let allowed = *allowed_peer.lock();
+                match allowed {
+                    Some(ip) if ip == from.ip() => {}
+                    Some(_) => continue, // other peer
+                    None => continue,    // not accepted yet
+                }
+
                 last_client_seen = Instant::now();
                 client_seen = true;
 

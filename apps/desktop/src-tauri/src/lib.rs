@@ -64,6 +64,11 @@ fn stop_host(session: State<'_, SessionManager>) -> Result<HostStatus, String> {
 }
 
 #[tauri::command]
+fn respond_to_join(session: State<'_, SessionManager>, accept: bool) -> Result<HostStatus, String> {
+    session.respond_to_join(accept)
+}
+
+#[tauri::command]
 fn set_allow_remote_input(session: State<'_, SessionManager>, allow: bool) -> HostStatus {
     session.set_allow_remote_input(allow)
 }
@@ -102,6 +107,7 @@ pub fn run() {
             install_vigem_driver,
             start_host,
             stop_host,
+            respond_to_join,
             set_allow_remote_input,
             connect_client,
             disconnect_client,
