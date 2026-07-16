@@ -242,21 +242,32 @@ impl SessionManager {
 
     pub fn respond_to_join(&self, accept: bool) -> Result<HostStatus, String> {
         let mut inner = self.inner.lock();
-        let Some(ref join) = inner.host_join else {
-            return Err("Host is not listening.".into());
-        };
         let decision = if accept {
             JoinDecision::Accept
         } else {
             JoinDecision::Reject
         };
-        let msg = join.decide(decision)?;
+        // Scope join borrow so we can mutate `inner` afterward (E0502).
+        let (msg, peer_ip) = {
+            let join = inner
+                .host_join
+                .as_ref()
+                .ok_or_else(|| "Host is not listening.".to_string())?;
+            let msg = join.decide(decision)?;
+            let peer_ip = if accept {
+                join.allowed_peer().lock().clone()
+            } else {
+                None
+            };
+            (msg, peer_ip)
+        };
+
         inner.host.pending_join = None;
         if accept {
             inner.host.session_active = true;
             inner.host.state = SessionState::Streaming;
             // Point video UDP at accepted peer (media_port + 1).
-            if let Some(ip) = join.allowed_peer().lock().clone() {
+            if let Some(ip) = peer_ip {
                 let vport = video_port_from_media(inner.host.media_port);
                 let addr = SocketAddr::new(ip, vport);
                 if let Some(ref sink) = inner.host_video_sink {
