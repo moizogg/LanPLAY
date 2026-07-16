@@ -23,4 +23,5 @@ lanplay-shared = { path = "../../../packages/shared" }
 lanplay-protocol = { path = "../../../packages/protocol" }
 lanplay-networking = { path = "../../../packages/networking" }
 lanplay-controllers = { path = "../../../packages/controllers" }
+lanplay-video = { path = "../../../packages/video" }
 lanplay-overlay = { path = "../../../packages/overlay" }

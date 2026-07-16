@@ -1,5 +1,10 @@
 //! Video pipeline (Phase 4+).
 //!
-//! Capture → HW encode → network → decode → present.
+//! Phase 4: desktop capture + FPS/timing (no network yet).
+//! Later: encode → stream → decode → present.
 
-pub const PLACEHOLDER: &str = "video-phase-4";
+mod capture;
+mod stats;
+
+pub use capture::{run_host_capture_loop, CaptureBackend, CaptureConfig, HostCaptureHandle};
+pub use stats::{AtomicCaptureStats, CaptureSnapshot};

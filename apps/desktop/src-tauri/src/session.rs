@@ -11,6 +11,9 @@ use lanplay_networking::{
 use lanplay_shared::{
     ClientStatus, ControllerStats, HostStatus, PendingJoinInfo, SessionState,
 };
+use lanplay_video::{
+    run_host_capture_loop, CaptureConfig, CaptureSnapshot, HostCaptureHandle,
+};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +28,7 @@ struct SessionInner {
     client: ClientStatus,
     host_input: Option<HostInputHandle>,
     host_join: Option<HostJoinHandle>,
+    host_capture: Option<HostCaptureHandle>,
     client_input: Option<ClientInputHandle>,
     client_control: Option<ClientControlSession>,
     allow_remote_input: bool,
@@ -61,6 +65,7 @@ impl Default for SessionInner {
             },
             host_input: None,
             host_join: None,
+            host_capture: None,
             client_input: None,
             client_control: None,
             allow_remote_input: true,
@@ -162,6 +167,13 @@ impl SessionManager {
             }
         };
 
+        // Phase 4: start desktop capture for FPS / timing (no stream yet)
+        let capture_handle = run_host_capture_loop(CaptureConfig {
+            output_index: 0,
+            target_fps: 60,
+        })
+        .ok();
+
         let vigem_ok = input_handle.vigem_ok();
         let vigem_detail = input_handle.vigem_detail().to_string();
 
@@ -171,11 +183,12 @@ impl SessionManager {
         inner.host.pending_join = None;
         inner.host.session_active = false;
         inner.host.message = format!(
-            "Listening on control :{control} / input :{media}. Accept join requests to start a session. {vigem_detail}"
+            "Listening on control :{control} / input :{media}. Desktop capture running (Phase 4). Accept joins. {vigem_detail}"
         );
 
         inner.host_join = Some(join_handle);
         inner.host_input = Some(input_handle);
+        inner.host_capture = capture_handle;
         Ok(inner.host.clone())
     }
 
@@ -187,6 +200,9 @@ impl SessionManager {
         }
         if let Some(h) = inner.host_input.take() {
             h.stop();
+        }
+        if let Some(c) = inner.host_capture.take() {
+            c.stop();
         }
         inner.host.state = SessionState::Idle;
         inner.host.packets_received = 0;
@@ -402,6 +418,24 @@ impl SessionManager {
             CaptureStatus {
                 active: false,
                 hint: "Join a host session to enable input capture.".into(),
+            }
+        }
+    }
+
+    /// Phase 4 capture metrics (host only).
+    pub fn get_capture_stats(&self) -> CaptureSnapshot {
+        let inner = self.inner.lock();
+        if let Some(ref c) = inner.host_capture {
+            c.stats().snapshot()
+        } else {
+            CaptureSnapshot {
+                active: false,
+                frames: 0,
+                width: 0,
+                height: 0,
+                fps: 0.0,
+                last_capture_ms: 0.0,
+                detail: "Capture not running (Start Host to begin).".into(),
             }
         }
     }

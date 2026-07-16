@@ -5,6 +5,7 @@ mod vigem_setup;
 use lanplay_controllers::{CaptureStatus, VigemBundleStatus};
 use lanplay_protocol::PROTOCOL_VERSION;
 use lanplay_shared::{ClientStatus, ControllerStats, HostStatus, TailscaleInfo};
+use lanplay_video::CaptureSnapshot;
 use session::SessionManager;
 use tauri::State;
 
@@ -14,7 +15,7 @@ fn get_app_info() -> serde_json::Value {
         "name": "LANPlay",
         "version": env!("CARGO_PKG_VERSION"),
         "protocolVersion": PROTOCOL_VERSION,
-        "phase": 2,
+        "phase": 4,
     })
 }
 
@@ -106,6 +107,11 @@ fn toggle_input_capture(session: State<'_, SessionManager>) -> Result<CaptureSta
     session.toggle_input_capture()
 }
 
+#[tauri::command]
+fn get_capture_stats(session: State<'_, SessionManager>) -> CaptureSnapshot {
+    session.get_capture_stats()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -132,6 +138,7 @@ pub fn run() {
             get_input_capture,
             set_input_capture,
             toggle_input_capture,
+            get_capture_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LANPlay");

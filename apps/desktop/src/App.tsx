@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
   AppMode,
+  CaptureSnapshot,
   CaptureStatus,
   ClientStatus,
   ControllerStats,
@@ -57,6 +58,9 @@ export default function App() {
     null,
   );
   const [capture, setCapture] = useState<CaptureStatus | null>(null);
+  const [desktopCapture, setDesktopCapture] = useState<CaptureSnapshot | null>(
+    null,
+  );
   const [hostIp, setHostIp] = useState("");
   const [controlPort, setControlPort] = useState(47800);
   const [mediaPort, setMediaPort] = useState(47801);
@@ -68,16 +72,18 @@ export default function App() {
   /** Session/controller metrics only — safe to poll often (no external CLI). */
   const refreshLive = useCallback(async () => {
     try {
-      const [h, c, st, cap] = await Promise.all([
+      const [h, c, st, cap, desk] = await Promise.all([
         invoke<HostStatus>("get_host_status"),
         invoke<ClientStatus>("get_client_status"),
         invoke<ControllerStats>("get_controller_stats"),
         invoke<CaptureStatus>("get_input_capture"),
+        invoke<CaptureSnapshot>("get_capture_stats"),
       ]);
       setHost(h);
       setClient(c);
       setStats(st);
       setCapture(cap);
+      setDesktopCapture(desk);
       setControlPort(h.controlPort);
       setMediaPort(h.mediaPort);
     } catch (e) {
@@ -488,6 +494,38 @@ export default function App() {
                 Session active with accepted client.
               </p>
             )}
+
+            <div className="rounded-xl border border-white/10 bg-black/30 p-4 text-sm">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Desktop capture (Phase 4)
+              </p>
+              <p className="mt-1 text-slate-300">
+                {desktopCapture?.active ? (
+                  <>
+                    <span className="font-mono text-cyan-300">
+                      {desktopCapture.width}×{desktopCapture.height}
+                    </span>{" "}
+                    ·{" "}
+                    <span className="font-mono text-emerald-300">
+                      {desktopCapture.fps.toFixed(1)} FPS
+                    </span>{" "}
+                    · capture{" "}
+                    <span className="font-mono">
+                      {desktopCapture.lastCaptureMs.toFixed(2)} ms
+                    </span>{" "}
+                    · frames {desktopCapture.frames}
+                  </>
+                ) : (
+                  <span className="text-slate-500">Not running</span>
+                )}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                {desktopCapture?.detail ?? "Start Host to begin DXGI capture."}
+              </p>
+              <p className="mt-1 text-[11px] text-slate-600">
+                Capture only for now — no video stream to client yet (Phase 6).
+              </p>
+            </div>
 
             <div className="flex flex-wrap gap-3">
               {!hostListening ? (

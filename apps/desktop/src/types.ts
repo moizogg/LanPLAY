@@ -76,3 +76,14 @@ export interface CaptureStatus {
   active: boolean;
   hint: string;
 }
+
+/** Phase 4 host desktop capture stats */
+export interface CaptureSnapshot {
+  active: boolean;
+  frames: number;
+  width: number;
+  height: number;
+  fps: number;
+  lastCaptureMs: number;
+  detail: string;
+}
