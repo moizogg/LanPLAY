@@ -154,7 +154,7 @@ fn host_loop(
             }
             pad_flags.virtual_active.store(0, Ordering::Relaxed);
             stats.set_detail(
-                "Client controller gone / timed out — virtual Xbox 360 removed.".into(),
+                "Client controller gone / timed out — virtual Xbox 360 removed.",
             );
         }
 
@@ -162,8 +162,7 @@ fn host_loop(
             client_seen = false;
             if pad.is_none() {
                 stats.set_detail(
-                    "No client packets — still listening. No virtual pad until client controller."
-                        .into(),
+                    "No client packets — still listening. No virtual pad until client controller.",
                 );
             }
         }
@@ -200,15 +199,13 @@ fn host_loop(
                         if pad.is_none() {
                             if !vigem_ok {
                                 stats.set_detail(
-                                    "Client has a controller but ViGEmBus is not ready — install driver."
-                                        .into(),
+                                    "Client has a controller but ViGEmBus is not ready — install driver.",
                                 );
                             } else {
                                 match create_virtual_pad() {
                                     Ok(p) => {
                                         stats.set_detail(
-                                            "Client controller connected → virtual Xbox 360 created on host."
-                                                .into(),
+                                            "Client controller connected → virtual Xbox 360 created on host.",
                                         );
                                         pad_flags.virtual_active.store(1, Ordering::Relaxed);
                                         pad = Some(p);
@@ -230,7 +227,7 @@ fn host_loop(
                             let _ = p.unplug();
                             pad_flags.virtual_active.store(0, Ordering::Relaxed);
                             stats.set_detail(
-                                "Client has no controller — virtual Xbox 360 removed.".into(),
+                                "Client has no controller — virtual Xbox 360 removed.",
                             );
                         }
                     }
@@ -245,8 +242,7 @@ fn host_loop(
                     apply_kbm_on_host(&mut kbm_state, &packet);
                     if pad.is_none() {
                         stats.set_detail(
-                            "Receiving client keyboard/mouse. Virtual pad appears only if they plug a controller."
-                                .into(),
+                            "Receiving client keyboard/mouse. Virtual pad appears only if they plug a controller.",
                         );
                     }
                 }
